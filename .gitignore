@@ -1,0 +1,16 @@
+node_modules/
+out/
+dist/
+*.vsix
+.vscode-test/
+.DS_Store
+webview/node_modules/
+webview/build/
+webview/dist/
+.codoc/
+
+
+.idea/
+*.log
+.env
+node_modules/

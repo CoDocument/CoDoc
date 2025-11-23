@@ -1,0 +1,110 @@
+{
+  "name": "codoc",
+  "displayName": "CoDoc - Intelligent Code Documentation",
+  "description": "Lightweight CODOC editor with OpenCode integration and dependency-aware code generation",
+  "version": "0.1.0",
+  "publisher": "codoc",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codoc.initCoDoc",
+        "title": "CoDoc: Init CoDoc",
+        "icon": "$(notebook)"
+      },
+      {
+        "command": "codoc.openEditor",
+        "title": "CoDoc: Open Editor",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "codoc.scanCodebase",
+        "title": "CoDoc: Scan Codebase"
+      },
+      {
+        "command": "codoc.generateWithOpenCode",
+        "title": "CoDoc: Generate with OpenCode"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codoc.openEditor",
+          "when": "resourceExtname == .codoc",
+          "group": "navigation"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "codoc",
+        "aliases": [
+          "CoDoc",
+          "codoc"
+        ],
+        "extensions": [
+          ".codoc"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "codoc.editor",
+        "displayName": "CoDoc Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.codoc"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "configuration": {
+      "title": "CoDoc",
+      "properties": {
+        "codoc.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for impact analysis and code generation features",
+          "order": 1
+        },
+        "codoc.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically sync CoDoc file with codebase changes",
+          "order": 2
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build:webview": "cd webview-ui && npm run build",
+    "dev:webview": "cd webview-ui && npm run dev"
+  },
+  "devDependencies": {
+    "@types/babel__traverse": "^7.28.0",
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.23.0",
+    "@babel/traverse": "^7.28.5",
+    "@babel/types": "^7.23.0",
+    "chevrotain": "^11.0.3"
+  }
+}
