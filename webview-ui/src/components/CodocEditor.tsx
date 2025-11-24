@@ -45,10 +45,10 @@ import { EditorView } from '@codemirror/view';
 import { codocSyntaxHighlighting } from '../lib/editor/codocSyntaxHighlighting';
 import { schemaFoldingExtension } from '../lib/editor/schemaFoldingExtension';
 import { fileStructureExtension } from '../lib/editor/fileStructureExtension';
-import { feedbackDecorationExtension, showFeedbackDecorationsInView, clearFeedbackDecorationsInView, addFeedbackDecorationsInView, CodocMergeChange } from '../lib/editor/feedbackDecorationExtension';
-import { feedforwardExtension, applyFeedforwardSuggestions, clearFeedforwardSuggestions } from '../lib/editor/feedforwardService';
+import { feedbackDecorationExtension, showFeedbackDecorationsInView, clearFeedbackDecorationsInView, CodocMergeChange } from '../lib/editor/feedbackDecorationExtension';
+import { feedforwardExtension, applyFeedforwardSuggestions, clearFeedforwardSuggestions, type FeedforwardSuggestion } from '../lib/editor/feedforwardService';
 import { dependencyHighlightExtension, setDependencyGraphInView, DependencyGraph as DependencyGraphType } from '../lib/editor/dependencyHighlightExtension';
-import { SchemaNode, SuggestedChange } from '../types';
+import { SchemaNode } from '../types';
 
 // VSCode API
 declare const acquireVsCodeApi: () => {
@@ -59,17 +59,56 @@ declare const acquireVsCodeApi: () => {
 
 const vscode = acquireVsCodeApi();
 
+function detectSuggestionType(text: string): FeedforwardSuggestion['type'] {
+  if (text.startsWith('/')) return 'directory';
+  if (text.startsWith('%')) return 'component';
+  if (text.startsWith('$')) return 'function';
+  if (text.startsWith('@')) return 'reference';
+  if (text.includes('.')) return 'file';
+  return 'variable';
+}
+
 export const CodocEditor: React.FC = () => {
   const [content, setContent] = useState('');
   const [parsedSchema, setParsedSchema] = useState<SchemaNode[]>([]);
   const [codebase, setCodebase] = useState<any[]>([]);
   const [dependencyGraph, setDependencyGraph] = useState<DependencyGraphType | null>(null);
   const editorRef = useRef<ReactCodeMirrorRef>(null);
+  const feedforwardTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Get EditorView instance from the ref
   const getEditorView = (): EditorView | null => {
     return editorRef.current?.view ?? null;
   };
+
+  // Request feedforward suggestions with debounce
+  const requestFeedforward = useCallback((content: string) => {
+    // Clear existing timeout
+    if (feedforwardTimeoutRef.current) {
+      clearTimeout(feedforwardTimeoutRef.current);
+    }
+
+    // Cancel any pending feedforward requests
+    vscode.postMessage({ type: 'cancelFeedforward' });
+
+    // Debounce feedforward request
+    feedforwardTimeoutRef.current = setTimeout(() => {
+      const view = getEditorView();
+      if (!view) return;
+
+      const cursorPos = view.state.selection.main.head;
+      const cursorLine = view.state.doc.lineAt(cursorPos).number - 1;
+      const cursorColumn = cursorPos - view.state.doc.line(cursorLine + 1).from;
+
+      vscode.postMessage({
+        type: 'requestFeedforward',
+        content,
+        cursorLine,
+        cursorColumn,
+        parsedSchema
+      });
+    }, 800); // 800ms debounce
+  }, [parsedSchema]);
 
   // Handle messages from extension - connects backend services to frontend extensions
   useEffect(() => {
@@ -98,19 +137,19 @@ export const CodocEditor: React.FC = () => {
         case 'feedbackChanges':
           // StructuralDiffEngine → feedbackDecorationExtension
           // Backend structural analysis drives feedback decorations
-          // Use addFeedbackDecorationsInView to accumulate changes across generations
+          // REPLACES all decorations with AI-generated changes after generation
           if (view && message.changes) {
             const changes = message.changes as CodocMergeChange[];
-            addFeedbackDecorationsInView(view, changes);
+            showFeedbackDecorationsInView(view, changes);
           }
           break;
 
         case 'showFeedbackDecorations':
           // New: Show feedback decorations after code generation
-          // Use addFeedbackDecorationsInView to accumulate changes
+          // REPLACES all decorations with new AI changes
           if (view && message.changes) {
             const changes = message.changes as CodocMergeChange[];
-            addFeedbackDecorationsInView(view, changes);
+            showFeedbackDecorationsInView(view, changes);
           }
           break;
 
@@ -127,11 +166,19 @@ export const CodocEditor: React.FC = () => {
           }
           break;
 
-        case 'suggestions':
-          // ImpactAnalysisService → feedforwardService
-          // Backend impact analysis drives feedforward suggestions
+        // case 'suggestions':
+        //   // ImpactAnalysisService → feedforwardService
+        //   // Backend impact analysis drives feedforward suggestions
+        //   if (view && message.suggestions) {
+        //     const suggestions = message.suggestions as SuggestedChange[];
+        //     applyFeedforwardSuggestions(view, suggestions);
+        //   }
+        //   break;
+
+        case 'feedforwardSuggestions':
+          // New: Feedforward suggestions from backend
           if (view && message.suggestions) {
-            const suggestions = message.suggestions as SuggestedChange[];
+            const suggestions = message.suggestions as FeedforwardSuggestion[];
             applyFeedforwardSuggestions(view, suggestions);
           }
           break;
@@ -141,16 +188,17 @@ export const CodocEditor: React.FC = () => {
             clearFeedforwardSuggestions(view);
           }
           break;
-
-        case 'generationComplete':
-          // After generation, analyze and show diff
-          vscode.postMessage({ type: 'analyzeChanges' });
-          break;
       }
     };
 
     window.addEventListener('message', messageHandler);
-    return () => window.removeEventListener('message', messageHandler);
+    return () => {
+      window.removeEventListener('message', messageHandler);
+      // Clean up feedforward timeout on unmount
+      if (feedforwardTimeoutRef.current) {
+        clearTimeout(feedforwardTimeoutRef.current);
+      }
+    };
   }, [parsedSchema, codebase]);
 
   // Update dependency graph in view when it changes
@@ -176,6 +224,15 @@ export const CodocEditor: React.FC = () => {
     vscode.postMessage({ type: 'generateCode' });
   }, []);
 
+  const handleMockGenerateCode = useCallback(() => {
+    // Clear previous feedback before generating
+    const view = getEditorView();
+    if (view) {
+      clearFeedbackDecorationsInView(view);
+    }
+    vscode.postMessage({ type: 'mockGenerateCode' });
+  }, []);
+
   const handleClearFeedback = useCallback(() => {
     const view = getEditorView();
     if (view) {
@@ -190,7 +247,10 @@ export const CodocEditor: React.FC = () => {
       type: 'contentChanged',
       content: value
     });
-  }, []);
+    
+    // Trigger feedforward generation on content changes
+    // requestFeedforward(value);
+  }, [requestFeedforward]);
 
   // Combine all extensions
   const extensions = React.useMemo(() => [
@@ -245,6 +305,21 @@ export const CodocEditor: React.FC = () => {
           }}
         >
           Generate
+        </button>
+        <button 
+          onClick={handleMockGenerateCode}
+          style={{
+            padding: '4px 8px',
+            fontSize: '12px',
+            backgroundColor: 'var(--vscode-button-background)',
+            color: 'var(--vscode-button-foreground)',
+            border: 'none',
+            borderRadius: '2px',
+            cursor: 'pointer'
+          }}
+          title="Mock generation for testing (no OpenCode)"
+        >
+          Mock Gen
         </button>
         <button 
           onClick={handleClearFeedback}

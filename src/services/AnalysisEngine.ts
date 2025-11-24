@@ -79,7 +79,6 @@ export class AnalysisEngine {
 
     // Build dependency graph
     snapshot.dependencyGraph = this.buildDependencyGraph(snapshot.files);
-    console.log('Dependency graph', snapshot.dependencyGraph);
 
     // Extract directories
     snapshot.directories = this.extractDirectories(snapshot.files);

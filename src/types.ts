@@ -88,6 +88,43 @@ export interface StructuralDiff {
   renamed: RenamedNode[];
 }
 
+/**
+ * Comprehensive AI-generated change classification
+ * Only captures changes made by AI, not human edits
+ */
+export interface AIChange {
+  id: string;
+  type: 'add' | 'remove' | 'modify' | 'rename' | 'move' | 'refactor';
+  
+  // Change details
+  element: {
+    type: 'component' | 'function' | 'variable' | 'file' | 'directory' | 'reference';
+    name: string;
+    path: string;
+  };
+  
+  // Location in CoDoc for decoration
+  lineNumber: number;
+  indentLevel: number;
+  
+  // Content for display
+  content?: string;
+  originalContent?: string;
+  
+  // For rename/move operations
+  fromPath?: string;
+  toPath?: string;
+  fromName?: string;
+  toName?: string;
+  
+  // For refactoring classification
+  refactorType?: 'extract' | 'inline' | 'split' | 'merge' | 'restructure';
+  
+  // Metadata
+  confidence: number; // 0-1 for fuzzy matches
+  timestamp: number;
+}
+
 export interface RenamedNode {
   from: SchemaNode;
   to: SchemaNode;

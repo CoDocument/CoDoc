@@ -251,14 +251,6 @@ function buildDependencyDecorations(view: EditorView): DecorationSet {
         graph
     );
 
-    console.log('=== Dependency Highlighting Debug ===');
-    console.log('Graph nodes count:', Object.keys(graph.nodes).length);
-    console.log('Graph edges count:', graph.edges.length);
-    console.log('Current Element:', currentElement);
-    console.log('Current File Path (full):', filePath);
-    console.log('Related IDs for highlighting:', Array.from(relatedIds));
-    console.log('Sample graph nodes:', Object.keys(graph.nodes).slice(0, 10));
-
 
     // Build decorations
     const builder = new RangeSetBuilder<Decoration>();
@@ -307,9 +299,6 @@ function buildDependencyDecorations(view: EditorView): DecorationSet {
             dimmedCount++;
         }
     }
-
-    console.log(`Applied decorations: ${relatedCount} related, ${dimmedCount} dimmed`);
-    console.log('First few relatedIds:', Array.from(relatedIds).slice(0, 5));
 
     return builder.finish();
 }
@@ -363,12 +352,6 @@ export function dependencyHighlightExtension() {
  * Helper to set the dependency graph
  */
 export function setDependencyGraphInView(view: EditorView, graph: DependencyGraph) {
-    console.log('=== Setting Dependency Graph ===');
-    console.log('Nodes count:', Object.keys(graph.nodes).length);
-    console.log('Edges count:', graph.edges.length);
-    console.log('Sample nodes:', Object.keys(graph.nodes).slice(0, 10));
-    console.log('Sample edges:', graph.edges.slice(0, 5));
-
     view.dispatch({
         effects: setDependencyGraph.of(graph)
     });

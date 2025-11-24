@@ -1,15 +1,75 @@
 /**
- * OpenCodeService - CLI wrapper for OpenCode integration
- * Handles authentication, code generation, and output parsing
+ * OpenCodeService - Terminal-based wrapper for OpenCode integration
+ * Handles authentication, code generation, and terminal management
  */
 
 import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as os from 'os';
 import { OpenCodeRequest, OpenCodeResponse } from '../types';
 
 export class OpenCodeService {
+  private terminal: vscode.Terminal | undefined;
+  private workspaceRoot: string | undefined;
+  private isInitialized: boolean = false;
+  private outputBuffer: string = '';
+
+  /**
+   * Get or create the OpenCode terminal
+   */
+  private async getOrCreateTerminal(workDir: string): Promise<vscode.Terminal> {
+    // Reuse existing terminal if same workspace and terminal still exists
+    if (this.terminal && this.workspaceRoot === workDir) {
+      // Check if terminal is still alive
+      const allTerminals = vscode.window.terminals;
+      if (allTerminals.includes(this.terminal)) {
+        return this.terminal;
+      }
+    }
+
+    // Create new terminal
+    this.terminal = vscode.window.createTerminal({
+      name: 'OpenCode',
+      cwd: workDir,
+      message: 'OpenCode Terminal - Ready for code generation'
+    });
+
+    this.workspaceRoot = workDir;
+    this.isInitialized = false;
+
+    // Show the terminal to user
+    this.terminal.show(true); // preserveFocus = true
+
+    return this.terminal;
+  }
+
+  /**
+   * Initialize OpenCode terminal with the project
+   * Runs 'opencode' and then '/init' command
+   */
+  async initializeTerminal(workDir: string): Promise<void> {
+    const terminal = await this.getOrCreateTerminal(workDir);
+    console.log('Initializing OpenCode terminal...', terminal);
+
+    // Start opencode in the terminal
+    terminal.sendText('opencode', true);
+    
+    // Wait a moment for opencode to start
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Run /init to create/update AGENTS.md
+    // terminal.sendText('/init', true);
+
+    // Wait for init to complete
+    // await new Promise(resolve => setTimeout(resolve, 1000));
+
+    this.isInitialized = true;
+
+    vscode.window.showInformationMessage(
+      'OpenCode terminal initialized. You can now generate code.'
+    );
+  }
+
   /**
    * Check if OpenCode CLI is authenticated
    */
@@ -27,39 +87,40 @@ export class OpenCodeService {
   }
 
   /**
-   * Generate code using OpenCode CLI
+   * Generate code using OpenCode Terminal
+   * Sends prompt directly to the existing OpenCode session
    */
   async generate(
     request: OpenCodeRequest,
     onProgress?: (line: string) => void
   ): Promise<OpenCodeResponse> {
     try {
-      // Build command using 'opencode run'
-      // OpenCode directly modifies files in the workspace, no JSON output expected
-      const model = request.model || 'anthropic/claude-4-5-sonnet-20241022';
-      
-      // Escape the prompt for shell
-      const escapedPrompt = request.prompt
-        .replace(/"/g, '\\"')
-        .replace(/\$/g, '\\$')
-        .replace(/`/g, '\\`');
-      
-      // Build command with model and prompt
-      const command = `opencode run "${escapedPrompt}"`;
+      // Ensure terminal is initialized
+      if (!this.isInitialized) {
+        await this.initializeTerminal(request.workDir);
+      }
 
-      console.log('Executing OpenCode command:', command);
-      // Execute command and wait for completion
-      const { output, exitCode } = await this.executeCommand(command, request.workDir);
-      console.log('OpenCode Output:', output, exitCode);
+      const terminal = await this.getOrCreateTerminal(request.workDir);
 
-      // Extract summary from output
-      const summary = this.extractSummary(output);
+      // Show terminal to user so they can see the progress
+      terminal.show(false); // preserveFocus = false, bring terminal to front
 
+      // Send the prompt directly to OpenCode
+      // Since we're already in OpenCode mode, we just send the prompt
+      terminal.sendText(JSON.stringify(request.prompt), true);
+
+      // Show info message
+      vscode.window.showInformationMessage(
+        'OpenCode is generating code. Watch the terminal for progress...'
+      );
+
+      // For now, we return a success response immediately
+      // In the future, we could monitor terminal output using shell integration
       return {
-        success: exitCode === 0,
-        output,
-        summary,
-        error: exitCode !== 0 ? 'OpenCode command failed' : undefined
+        success: true,
+        output: 'Generation in progress. Check the OpenCode terminal for details.',
+        summary: 'Code generation started in OpenCode terminal.',
+        error: undefined
       };
     } catch (error) {
       return {
@@ -72,65 +133,31 @@ export class OpenCodeService {
   }
 
   /**
-   * Execute shell command and capture output
+   * Start a new OpenCode session
    */
-  private async executeCommand(
-    command: string,
-    cwd: string
-  ): Promise<{ output: string; exitCode: number }> {
-    return new Promise((resolve) => {
-      const { exec } = require('child_process');
-      exec(
-        command,
-        { cwd, maxBuffer: 10 * 1024 * 1024 }, // 10MB buffer
-        (error: any, stdout: string, stderr: string) => {
-          const output = stdout + stderr;
-          const exitCode = error ? (error.code || 1) : 0;
-          resolve({ output, exitCode });
-        }
-      );
-    });
+  async startNewSession(): Promise<void> {
+    if (this.terminal && this.isInitialized) {
+      this.terminal.sendText('/new', true);
+      vscode.window.showInformationMessage('Started new OpenCode session');
+    }
   }
-
-
 
   /**
-   * Extract SUMMARY section from OpenCode response
-   * Looks for common summary patterns in LLM output
+   * Dispose the terminal
    */
-  extractSummary(output: string): string {
-    // Try to find explicit SUMMARY section (case insensitive)
-    const summaryMatch = output.match(/(?:^|\n)\s*(?:##?\s*)?SUMMARY[:\s]*\n([\s\S]*?)(?:\n\n|\n##|$)/i);
-    if (summaryMatch) {
-      return summaryMatch[1].trim();
+  dispose(): void {
+    if (this.terminal) {
+      // Send exit command first
+      this.terminal.sendText('/exit', true);
+      // Then dispose
+      setTimeout(() => {
+        this.terminal?.dispose();
+        this.terminal = undefined;
+        this.isInitialized = false;
+        this.workspaceRoot = undefined;
+      }, 500);
     }
-
-    // Try to find "In summary" or "Summary:" patterns
-    const inSummaryMatch = output.match(/(?:^|\n)\s*(?:In summary|Summary)[:\s,]+([\s\S]*?)(?:\n\n|$)/i);
-    if (inSummaryMatch) {
-      return inSummaryMatch[1].trim();
-    }
-
-    // Try to find changes/modifications section
-    const changesMatch = output.match(/(?:^|\n)\s*(?:##?\s*)?(?:Changes Made|Modifications)[:\s]*\n([\s\S]*?)(?:\n\n|\n##|$)/i);
-    if (changesMatch) {
-      return changesMatch[1].trim();
-    }
-
-    // Fallback: Get last substantial paragraph
-    const paragraphs = output.split(/\n\n+/).filter(p => p.trim().length > 20);
-    if (paragraphs.length > 0) {
-      const lastParagraph = paragraphs[paragraphs.length - 1].trim();
-      // Limit to reasonable summary length
-      if (lastParagraph.length <= 500) {
-        return lastParagraph;
-      }
-      return lastParagraph.substring(0, 500) + '...';
-    }
-
-    return 'Code generation completed. Check workspace for changes.';
   }
-
 
 
   /**

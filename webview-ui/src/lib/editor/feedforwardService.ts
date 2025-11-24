@@ -1,357 +1,534 @@
 import {
-  Decoration,
+  ViewPlugin,
   DecorationSet,
   EditorView,
-  ViewPlugin,
   ViewUpdate,
+  Decoration,
   WidgetType,
-  keymap
 } from "@codemirror/view";
 import {
-  RangeSetBuilder,
   StateEffect,
-  StateField
+  Text,
+  StateField,
+  EditorState,
+  EditorSelection,
+  Annotation
 } from "@codemirror/state";
-import type { SuggestedChange } from "../../types";
 
-interface FeedforwardEntry {
-  id: string;
-  syntax: string;
-  reason: string;
+// Annotation for marking feedforward acceptance transactions
+const feedforwardAcceptAnnotation = Annotation.define<boolean>();
+
+export interface FeedforwardSuggestion {
+  text: string;
   insertLine: number;
   indentLevel: number;
+  type: 'component' | 'function' | 'variable' | 'file' | 'directory' | 'reference';
+  // position: string;
+  id: string;
+  fullPath: string;
+  parent?: string;
+  groupId?: string;
+  groupItems?: string[];
+  sequence?: number;
+  contextPath?: string; // Path to existing file/directory where suggestion should be added
 }
 
-const setFeedforwardSuggestionsEffect = StateEffect.define<FeedforwardEntry[]>();
-const clearFeedforwardSuggestionsEffect = StateEffect.define<void>();
-const acceptFeedforwardSuggestionEffect = StateEffect.define<string>(); // Accept by ID
+export interface FeedforwardResult {
+  suggestions: FeedforwardSuggestion[];
+}
 
-const feedforwardState = StateField.define<FeedforwardEntry[]>({
-  create() {
-    return [];
-  },
-  update(value, transaction) {
-    for (const effect of transaction.effects) {
-      if (effect.is(setFeedforwardSuggestionsEffect)) {
-        return effect.value;
-      }
-      if (effect.is(clearFeedforwardSuggestionsEffect)) {
-        return [];
-      }
-      if (effect.is(acceptFeedforwardSuggestionEffect)) {
-        // Remove accepted suggestion
-        return value.filter(entry => entry.id !== effect.value);
+// State effects for managing feedforward
+const addFeedforwardEffect = StateEffect.define<{
+  suggestions: FeedforwardSuggestion[];
+  doc: Text;
+}>();
+
+const clearFeedforwardEffect = StateEffect.define<void>();
+const acceptSuggestionEffect = StateEffect.define<string>();
+const highlightSuggestionEffect = StateEffect.define<string | null>();
+const setNavigatingEffect = StateEffect.define<boolean>();
+
+// State field to manage feedforward state
+const feedforwardState = StateField.define<{
+  suggestions: FeedforwardSuggestion[];
+  acceptedSuggestions: Set<string>;
+  highlightedSuggestion: string | null;
+  isNavigating: boolean;
+  rejectedPatterns: Set<string>;
+}>({
+  create: () => ({
+    suggestions: [],
+    acceptedSuggestions: new Set(),
+    highlightedSuggestion: null,
+    isNavigating: false,
+    rejectedPatterns: new Set()
+  }),
+  update(value, tr) {
+    let newValue = { ...value };
+
+    for (const effect of tr.effects) {
+      if (effect.is(addFeedforwardEffect)) {
+        // Clear old suggestions and replace with new ones
+        console.log('[FRONTEND] Adding new feedforward suggestions:', effect.value.suggestions);
+        newValue.suggestions = effect.value.suggestions;
+        newValue.acceptedSuggestions = new Set();
+        newValue.highlightedSuggestion = null;
+        // Set to false so suggestions are visible immediately without pressing Alt
+        newValue.isNavigating = false;
+      } else if (effect.is(clearFeedforwardEffect)) {
+        newValue.suggestions = [];
+        newValue.acceptedSuggestions = new Set();
+        newValue.highlightedSuggestion = null;
+        newValue.isNavigating = false;
+      } else if (effect.is(acceptSuggestionEffect)) {
+        newValue.acceptedSuggestions = new Set(newValue.acceptedSuggestions);
+        newValue.acceptedSuggestions.add(effect.value);
+      } else if (effect.is(highlightSuggestionEffect)) {
+        newValue.highlightedSuggestion = effect.value;
+      } else if (effect.is(setNavigatingEffect)) {
+        newValue.isNavigating = effect.value;
       }
     }
 
-    if (transaction.docChanged) {
-      return [];
+    // Check for feedforward accept annotations
+    if (tr.annotation(feedforwardAcceptAnnotation)) {
+      return newValue;
     }
 
-    return value;
+    return newValue;
   }
 });
 
-function clampIndent(level: number): number {
-  if (!Number.isFinite(level) || level < 0) {
-    return 0;
-  }
-  return Math.min(level, 8);
-}
-
 /**
- * Accept a feedforward suggestion by inserting its content into the document
+ * Widget for displaying feedforward suggestions
  */
-function acceptSuggestion(view: EditorView, entry: FeedforwardEntry) {
-  const doc = view.state.doc;
-  const targetLineNumber = Math.min(entry.insertLine, doc.lines);
-  const targetLine = doc.line(targetLineNumber);
-  
-  // Insert the suggestion at the end of the target line
-  const insertPos = targetLine.to;
-  const indent = "  ".repeat(clampIndent(entry.indentLevel));
-  const textToInsert = `\n${indent}${entry.syntax}`;
-  
-  view.dispatch({
-    changes: { from: insertPos, insert: textToInsert },
-    effects: acceptFeedforwardSuggestionEffect.of(entry.id)
-  });
-}
-
-function buildDecorations(view: EditorView, entries: FeedforwardEntry[]): DecorationSet {
-  if (entries.length === 0) {
-    return Decoration.none;
-  }
-
-  const builder = new RangeSetBuilder<Decoration>();
-  const doc = view.state.doc;
-  const lastLine = Math.max(1, doc.lines);
-
-  for (const entry of entries) {
-    const withinDocument = entry.insertLine >= 1 && entry.insertLine <= doc.lines;
-    const targetLineNumber = withinDocument ? entry.insertLine : lastLine;
-    const targetLine = doc.line(Math.max(1, targetLineNumber));
-    const appendToEnd = entry.insertLine > doc.lines || doc.length === 0;
-    const insertPos = appendToEnd ? doc.length : targetLine.to;
-
-    if (withinDocument) {
-      builder.add(
-        targetLine.from,
-        targetLine.from,
-        Decoration.line({
-          class: "cm-feedforwardLine",
-          attributes: { "data-feedforward-id": entry.id }
-        })
-      );
-    }
-
-    builder.add(
-      insertPos,
-      insertPos,
-      Decoration.widget({
-        widget: new FeedforwardWidget(entry),
-        side: 1,
-        block: true
-      })
-    );
-  }
-
-  return builder.finish();
-}
-
-class FeedforwardWidget extends WidgetType {
-  private readonly entry: FeedforwardEntry;
-
-  constructor(entry: FeedforwardEntry) {
+class FeedforwardLineWidget extends WidgetType {
+  constructor(
+    readonly suggestion: FeedforwardSuggestion,
+    readonly isHighlighted: boolean,
+    readonly isAccepted: boolean,
+    readonly isVisible: boolean
+  ) {
     super();
-    this.entry = entry;
   }
 
-  override toDOM(view: EditorView): HTMLElement {
-    const container = document.createElement("div");
-    container.className = "cm-feedforwardSuggestion";
-    container.setAttribute("data-suggestion-id", this.entry.id);
-
-    if (this.entry.reason) {
-      container.title = this.entry.reason;
+  toDOM(): HTMLElement {
+    const container = document.createElement('div');
+    container.className = 'cm-feedforwardSuggestion';
+    
+    if (!this.isVisible) {
+      container.style.display = 'none';
+    }
+    
+    if (this.isAccepted) {
+      container.style.backgroundColor = 'rgba(34, 197, 94, 0.2)';
+      container.style.borderLeft = '3px solid rgba(34, 197, 94, 0.6)';
+      container.style.opacity = '0.7';
+    } else if (this.isHighlighted) {
+      container.style.backgroundColor = 'rgba(14, 165, 233, 0.25)';
+      container.style.borderLeft = '3px solid rgba(14, 165, 233, 0.8)';
+    } else {
+      container.style.backgroundColor = 'rgba(156, 163, 175, 0.15)';
+      container.style.borderLeft = '3px solid rgba(156, 163, 175, 0.4)';
     }
 
-    // Add accept button
-    const acceptButton = document.createElement("button");
-    acceptButton.className = "cm-feedforwardAcceptButton";
-    acceptButton.textContent = "✓";
-    acceptButton.title = "Accept suggestion (Tab or Ctrl+↓)";
-    acceptButton.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      acceptSuggestion(view, this.entry);
-    };
-    container.appendChild(acceptButton);
-
-    const code = document.createElement("pre");
-    code.className = "cm-feedforwardSuggestionCode";
-    code.textContent = `${"  ".repeat(clampIndent(this.entry.indentLevel))}${this.entry.syntax}`;
+    const indent = '  '.repeat(Math.max(0, this.suggestion.indentLevel));
+    const code = document.createElement('pre');
+    code.className = 'cm-feedforwardSuggestionCode';
+    code.textContent = indent + this.suggestion.text.trim();
     container.appendChild(code);
-
-    if (this.entry.reason) {
-      const reason = document.createElement("div");
-      reason.className = "cm-feedforwardSuggestionReason";
-      reason.textContent = this.entry.reason;
-      container.appendChild(reason);
-    }
 
     return container;
   }
 
-  override eq(other: FeedforwardWidget): boolean {
+  eq(other: FeedforwardLineWidget): boolean {
     return (
-      this.entry.id === other.entry.id &&
-      this.entry.syntax === other.entry.syntax &&
-      this.entry.reason === other.entry.reason &&
-      this.entry.indentLevel === other.entry.indentLevel &&
-      this.entry.insertLine === other.entry.insertLine
+      this.suggestion.id === other.suggestion.id &&
+      this.isHighlighted === other.isHighlighted &&
+      this.isAccepted === other.isAccepted &&
+      this.isVisible === other.isVisible
     );
   }
 
-  override ignoreEvent(): boolean {
-    return false; // Allow click events
-  }
-
-  override get estimatedHeight(): number {
-    return this.entry.reason ? 50 : 34;
+  get estimatedHeight(): number {
+    return 24;
   }
 }
 
+/**
+ * Calculate insertion position for dynamic line
+ */
+function calculateInsertionPositionForDynamicLine(
+  state: EditorState, 
+  dynamicLine: number
+): number {
+  const doc = state.doc;
+  const targetLine = Math.min(Math.max(dynamicLine, 1), doc.lines);
+
+  if (targetLine <= doc.lines) {
+    const line = doc.line(targetLine);
+    return line.to;
+  }
+
+  return doc.length;
+}
+
+/**
+ * Format suggestion for insertion
+ */
+function formatSuggestionText(suggestion: FeedforwardSuggestion): string {
+  const indent = '  '.repeat(Math.max(0, suggestion.indentLevel));
+  
+  if (suggestion.groupItems && suggestion.groupItems.length > 1) {
+    return '\n' + suggestion.groupItems.map(item => {
+      const itemTrimmed = item.trim();
+      return indent + itemTrimmed;
+    }).join('\n');
+  }
+  
+  return '\n' + indent + suggestion.text.trim();
+}
+
+/**
+ * Enhanced plugin with Alt+Tab navigation
+ */
 const feedforwardPlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
+    ctrlShiftPressed = false;
+    handleKeyDown?: (e: KeyboardEvent) => void;
+    handleKeyUp?: (e: KeyboardEvent) => void;
 
     constructor(view: EditorView) {
-      this.decorations = buildDecorations(view, view.state.field(feedforwardState));
+      this.decorations = Decoration.none;
+      this.setupEventListeners(view);
+      // Build initial decorations
+      this.buildDecorations(view);
+    }
+
+    setupEventListeners(view: EditorView) {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (this.ctrlShiftPressed) {
+          e.preventDefault();
+        }
+        if (e.altKey && !this.ctrlShiftPressed) {
+          e.preventDefault();
+          this.ctrlShiftPressed = true;
+          // Enable navigation mode when Alt is pressed
+          view.dispatch({
+            effects: setNavigatingEffect.of(true)
+          });
+          this.buildDecorations(view); // Rebuild decorations when Alt is pressed
+          this.updateHighlight(view);
+        } else if (this.ctrlShiftPressed && e.key === 'Tab') {
+          e.preventDefault();
+          const state = view.state.field(feedforwardState);
+
+          if (!state.highlightedSuggestion) return false;
+
+          const suggestion = state.suggestions.find(s => s.id === state.highlightedSuggestion);
+          if (!suggestion) return false;
+
+          view.dispatch({
+            effects: [acceptSuggestionEffect.of(suggestion.id)]
+          });
+
+          this.updateHighlight(view);
+          return true;
+        } else if (this.ctrlShiftPressed && e.key === 'ArrowRight') {
+          e.preventDefault();
+          const state = view.state.field(feedforwardState);
+
+          if (!state.isNavigating || state.suggestions.length === 0) return false;
+
+          const availableSuggestions = state.suggestions.filter(s => !state.acceptedSuggestions.has(s.id));
+          if (availableSuggestions.length === 0) return false;
+
+          const currentIndex = state.highlightedSuggestion ?
+            availableSuggestions.findIndex(s => s.id === state.highlightedSuggestion) : -1;
+
+          const nextIndex = (currentIndex + 1) % availableSuggestions.length;
+          const nextSuggestion = availableSuggestions[nextIndex];
+
+          if (nextSuggestion) {
+            view.dispatch({
+              effects: highlightSuggestionEffect.of(null)
+            });
+            
+            setTimeout(() => {
+              view.dispatch({
+                effects: highlightSuggestionEffect.of(nextSuggestion.id)
+              });
+            }, 10);
+          }
+
+          return true;
+        }
+      };
+
+      const handleKeyUp = (e: KeyboardEvent) => {
+        if (!e.altKey && this.ctrlShiftPressed) {
+          e.preventDefault();
+          this.ctrlShiftPressed = false;
+          
+          const state = view.state.field(feedforwardState);
+          
+          if (state.acceptedSuggestions.size > 0) {
+            console.log('Alt key released - inserting all accepted suggestions');
+            this.insertAllAcceptedSuggestions(view, state);
+          } else {
+            // Disable navigation mode when Alt is released
+            view.dispatch({
+              effects: setNavigatingEffect.of(false)
+            });
+          }
+          
+          // Rebuild decorations after Alt is released
+          this.buildDecorations(view);
+        }
+      };
+
+      this.handleKeyDown = handleKeyDown;
+      this.handleKeyUp = handleKeyUp;
+
+      window.addEventListener('keydown', handleKeyDown);
+      window.addEventListener('keyup', handleKeyUp);
+    }
+
+    findClosestSuggestion(
+      suggestions: FeedforwardSuggestion[],
+      acceptedSuggestions: Set<string>,
+      cursorLine: number
+    ): FeedforwardSuggestion | null {
+      const available = suggestions.filter(s => !acceptedSuggestions.has(s.id));
+      if (available.length === 0) return null;
+
+      let closest = available[0];
+      let minDistance = Math.abs(closest.insertLine - cursorLine);
+
+      for (const suggestion of available) {
+        const distance = Math.abs(suggestion.insertLine - cursorLine);
+        if (distance < minDistance) {
+          minDistance = distance;
+          closest = suggestion;
+        }
+      }
+
+      return closest;
+    }
+
+    insertAllAcceptedSuggestions(view: EditorView, state: any) {
+      const acceptedSuggestions = Array.from(state.acceptedSuggestions)
+        .map(id => state.suggestions.find((s: FeedforwardSuggestion) => s.id === id))
+        .filter(Boolean) as FeedforwardSuggestion[];
+
+      if (acceptedSuggestions.length === 0) return;
+
+      // Sort bottom-up for insertion
+      const bottomUp = [...acceptedSuggestions].sort((a, b) => {
+        if (b.insertLine !== a.insertLine) return b.insertLine - a.insertLine;
+        if (b.sequence !== undefined && a.sequence !== undefined) {
+          return a.sequence - b.sequence;
+        }
+        return b.indentLevel - a.indentLevel;
+      });
+
+      let lastSelectionPos: number | null = null;
+
+      for (const suggestion of bottomUp) {
+        const insertPos = calculateInsertionPositionForDynamicLine(view.state, suggestion.insertLine);
+        const insertText = formatSuggestionText(suggestion);
+
+        view.dispatch({
+          changes: { from: insertPos, to: insertPos, insert: insertText },
+          annotations: [feedforwardAcceptAnnotation.of(true)]
+        });
+
+        const endPos = insertPos + insertText.length;
+        lastSelectionPos = lastSelectionPos === null ? endPos : Math.max(lastSelectionPos, endPos);
+      }
+
+      if (lastSelectionPos !== null) {
+        view.dispatch({
+          selection: EditorSelection.cursor(lastSelectionPos),
+          effects: [clearFeedforwardEffect.of()]
+        });
+      } else {
+        view.dispatch({ effects: [clearFeedforwardEffect.of()] });
+      }
+
+      console.log('All accepted suggestions inserted successfully');
+    }
+
+    updateHighlight(view: EditorView) {
+      const state = view.state.field(feedforwardState);
+      if (state.suggestions.length === 0) return;
+
+      const cursorLine = view.state.doc.lineAt(view.state.selection.main.head).number - 1;
+      const closest = this.findClosestSuggestion(state.suggestions, state.acceptedSuggestions, cursorLine);
+
+      if (closest) {
+        view.dispatch({
+          effects: highlightSuggestionEffect.of(closest.id)
+        });
+      }
     }
 
     update(update: ViewUpdate) {
-      if (
-        update.docChanged ||
-        update.transactions.some(tr =>
-          tr.effects.some(effect =>
-            effect.is(setFeedforwardSuggestionsEffect) || effect.is(clearFeedforwardSuggestionsEffect)
-          )
-        )
-      ) {
-        this.decorations = buildDecorations(update.view, update.state.field(feedforwardState));
+      // Check if feedforward state changed or if document changed
+      let stateChanged = false;
+      for (const tr of update.transactions) {
+        for (const effect of tr.effects) {
+          if (effect.is(addFeedforwardEffect) || 
+              effect.is(clearFeedforwardEffect) || 
+              effect.is(acceptSuggestionEffect) || 
+              effect.is(highlightSuggestionEffect) ||
+              effect.is(setNavigatingEffect)) {
+            stateChanged = true;
+            break;
+          }
+        }
+        if (stateChanged) break;
+      }
+
+      // Rebuild decorations if state changed
+      if (stateChanged || update.docChanged) {
+        this.buildDecorations(update.view);
+      }
+    }
+
+    buildDecorations(view: EditorView, state?: any) {
+      if (!state) {
+        try {
+          state = view.state.field(feedforwardState);
+        } catch (e) {
+          this.decorations = Decoration.none;
+          return;
+        }
+      }
+
+      if (state.suggestions.length === 0) {
+        this.decorations = Decoration.none;
+        return;
+      }
+
+      console.log('[FEEDFORWARD] Building decorations for', state.suggestions.length, 'suggestions');
+
+      const decorationData: Array<{decoration: any, position: number}> = [];
+
+      for (const suggestion of state.suggestions) {
+        const isAccepted = state.acceptedSuggestions.has(suggestion.id);
+        const isHighlighted = state.highlightedSuggestion === suggestion.id;
+        
+        // Show suggestion if:
+        // - NOT navigating (show all by default)
+        // - OR it's highlighted (during navigation)
+        // - OR Alt key is pressed (during navigation)
+        // - OR it's accepted (always show accepted)
+        const isVisible = !state.isNavigating || isHighlighted || this.ctrlShiftPressed || isAccepted;
+
+        const doc = view.state.doc;
+        let targetLine: number = suggestion.insertLine;
+        
+        targetLine = Math.min(Math.max(targetLine, 1), doc.lines);
+        const line = doc.line(targetLine);
+
+        const widget = new FeedforwardLineWidget(suggestion, isHighlighted, isAccepted, isVisible);
+        const decoration = Decoration.widget({
+          widget,
+          side: 1
+        });
+
+        decorationData.push({
+          decoration: decoration.range(line.to),
+          position: line.to
+        });
+      }
+
+      decorationData.sort((a, b) => a.position - b.position);
+      this.decorations = Decoration.set(decorationData.map(d => d.decoration));
+      
+      console.log('[FEEDFORWARD] Built', decorationData.length, 'decorations');
+    }
+
+    destroy() {
+      if (this.handleKeyDown) {
+        window.removeEventListener('keydown', this.handleKeyDown);
+      }
+      if (this.handleKeyUp) {
+        window.removeEventListener('keyup', this.handleKeyUp);
       }
     }
   },
   {
-    decorations: instance => instance.decorations
+    decorations: (v) => v.decorations
   }
 );
 
+/**
+ * Theme for feedforward suggestions
+ */
 const feedforwardTheme = EditorView.baseTheme({
-  ".cm-feedforwardLine": {
-    backgroundColor: "rgba(14, 165, 233, 0.08)"
-  },
   ".cm-feedforwardSuggestion": {
-    margin: "4px 0",
-    padding: "6px 10px",
-    paddingRight: "40px",
-    borderRadius: "4px",
-    borderLeft: "3px solid rgba(14, 165, 233, 0.45)",
-    backgroundColor: "rgba(14, 165, 233, 0.1)",
+    margin: "2px 0",
+    padding: "4px 8px",
+    borderRadius: "3px",
     fontFamily: "inherit",
     fontSize: "0.95em",
-    lineHeight: "1.4",
+    lineHeight: "1.3",
     color: "inherit",
-    position: "relative"
-  },
-  ".cm-feedforwardAcceptButton": {
-    position: "absolute",
-    top: "6px",
-    right: "8px",
-    padding: "4px 8px",
-    backgroundColor: "rgba(34, 197, 94, 0.8)",
-    color: "white",
-    border: "none",
-    borderRadius: "3px",
-    cursor: "pointer",
-    fontSize: "12px",
-    fontWeight: "bold",
-    transition: "background-color 0.2s ease",
-    zIndex: "10"
-  },
-  ".cm-feedforwardAcceptButton:hover": {
-    backgroundColor: "rgba(34, 197, 94, 1)"
+    position: "relative",
+    transition: "all 0.2s ease"
   },
   ".cm-feedforwardSuggestionCode": {
     margin: "0",
     whiteSpace: "pre",
     fontFamily: "inherit"
   },
-  ".cm-feedforwardSuggestionReason": {
-    marginTop: "4px",
-    fontSize: "0.75rem",
-    opacity: "0.75"
-  },
-  "&dark .cm-feedforwardLine": {
-    backgroundColor: "rgba(56, 189, 248, 0.12)"
-  },
   "&dark .cm-feedforwardSuggestion": {
-    backgroundColor: "rgba(56, 189, 248, 0.12)",
-    borderLeft: "3px solid rgba(56, 189, 248, 0.6)"
-  },
-  "&dark .cm-feedforwardAcceptButton": {
-    backgroundColor: "rgba(74, 222, 128, 0.8)"
-  },
-  "&dark .cm-feedforwardAcceptButton:hover": {
-    backgroundColor: "rgba(74, 222, 128, 1)"
+    color: "rgba(209, 213, 219, 0.9)"
   }
 });
 
-/**
- * Find the nearest feedforward suggestion to the cursor
- */
-function findNearestSuggestion(view: EditorView): FeedforwardEntry | null {
-  const suggestions = view.state.field(feedforwardState);
-  if (suggestions.length === 0) return null;
-  
-  const cursorPos = view.state.selection.main.head;
-  const cursorLine = view.state.doc.lineAt(cursorPos).number;
-  
-  // Find suggestion on current line or closest below
-  let nearest: FeedforwardEntry | null = null;
-  let minDistance = Infinity;
-  
-  for (const suggestion of suggestions) {
-    const distance = Math.abs(suggestion.insertLine - cursorLine);
-    if (distance < minDistance || (distance === minDistance && suggestion.insertLine >= cursorLine)) {
-      minDistance = distance;
-      nearest = suggestion;
-    }
-  }
-  
-  return nearest;
-}
-
-/**
- * Keyboard shortcut handlers for accepting suggestions
- */
-const feedforwardKeymap = keymap.of([
-  {
-    key: "Tab",
-    run: (view) => {
-      const suggestion = findNearestSuggestion(view);
-      if (suggestion) {
-        acceptSuggestion(view, suggestion);
-        return true;
-      }
-      return false;
-    }
-  },
-  {
-    key: "Ctrl-ArrowDown",
-    run: (view) => {
-      const suggestion = findNearestSuggestion(view);
-      if (suggestion) {
-        acceptSuggestion(view, suggestion);
-        return true;
-      }
-      return false;
-    }
-  },
-  {
-    key: "Cmd-ArrowDown", // Mac
-    run: (view) => {
-      const suggestion = findNearestSuggestion(view);
-      if (suggestion) {
-        acceptSuggestion(view, suggestion);
-        return true;
-      }
-      return false;
-    }
-  }
-]);
-
 export function feedforwardExtension() {
-  return [feedforwardState, feedforwardPlugin, feedforwardTheme, feedforwardKeymap];
+  return [feedforwardState, feedforwardPlugin, feedforwardTheme];
 }
 
-export function applyFeedforwardSuggestions(view: EditorView, suggestions: SuggestedChange[]) {
-  const entries: FeedforwardEntry[] = suggestions.map((suggestion, index) => ({
-    id: `${suggestion.codocSyntax}-${suggestion.insertLine}-${index}`,
-    syntax: suggestion.codocSyntax.trim(),
-    reason: suggestion.reason ?? "",
-    insertLine: Number.isFinite(suggestion.insertLine) ? suggestion.insertLine : view.state.doc.lines + 1,
-    indentLevel: clampIndent(suggestion.indentLevel ?? 0)
-  }));
-
+export function addFeedforwardSuggestions(view: EditorView, suggestions: FeedforwardSuggestion[]) {
   view.dispatch({
-    effects: setFeedforwardSuggestionsEffect.of(entries)
+    effects: addFeedforwardEffect.of({
+      suggestions,
+      doc: view.state.doc
+    })
   });
 }
 
 export function clearFeedforwardSuggestions(view: EditorView) {
   view.dispatch({
-    effects: clearFeedforwardSuggestionsEffect.of()
+    effects: clearFeedforwardEffect.of()
   });
+}
+
+export function getFeedforwardState(view: EditorView) {
+  return view.state.field(feedforwardState);
+}
+
+
+/**
+ * Apply feedforward suggestions to the editor
+ * Expects suggestions to already be properly formatted from backend
+ */
+export function applyFeedforwardSuggestions(view: EditorView, suggestions: FeedforwardSuggestion[]) {
+  console.log('[FRONTEND] Applying feedforward suggestions:', suggestions);
+  
+  // Validate suggestions have required fields
+  const validSuggestions = suggestions.filter(s => 
+    s.id && s.text && typeof s.insertLine === 'number' && typeof s.indentLevel === 'number'
+  );
+
+  if (validSuggestions.length !== suggestions.length) {
+    console.warn('[FRONTEND] Some suggestions were invalid and filtered out');
+  }
+
+  addFeedforwardSuggestions(view, validSuggestions);
 }

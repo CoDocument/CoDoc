@@ -1,9 +1,15 @@
 /**
  * StructuralDiffEngine with content-hash-based rename detection
- * Detects add/remove/modify/rename changes in CODOC structure
+ * Detects add/remove/modify/rename/move/refactor changes in CODOC structure
+ * 
+ * This engine is used ONLY for comparing AI-generated changes:
+ * - Before generation: Store CoDoc snapshot
+ * - After generation: Rescan codebase and build new CoDoc
+ * - Compare: Identify all structural changes made by AI
  */
 
-import { SchemaNode, StructuralDiff, RenamedNode } from '../types';
+import { SchemaNode, StructuralDiff, RenamedNode, AIChange } from '../types';
+import * as crypto from 'crypto';
 
 export class StructuralDiffEngine {
   /**
@@ -244,6 +250,337 @@ export class StructuralDiffEngine {
     }
 
     return `${indent}${prefix}${node.name}`;
+  }
+
+  /**
+   * Convert StructuralDiff to AIChange[] for feedback decorations
+   * Classifies changes comprehensively: add/remove/modify/rename/move/refactor
+   */
+  convertToAIChanges(diff: StructuralDiff): AIChange[] {
+    const changes: AIChange[] = [];
+    const timestamp = Date.now();
+
+    // Process additions
+    for (const node of diff.added) {
+      changes.push({
+        id: `add_${node.id}_${timestamp}`,
+        type: 'add',
+        element: {
+          type: this.mapNodeTypeToElementType(node.type),
+          name: node.name,
+          path: node.path
+        },
+        lineNumber: node.lineNumber,
+        indentLevel: Math.floor(node.column / 2),
+        content: this.formatNodeAsCoDoc(node),
+        confidence: 1.0,
+        timestamp
+      });
+    }
+
+    // Process removals
+    for (const node of diff.removed) {
+      changes.push({
+        id: `remove_${node.id}_${timestamp}`,
+        type: 'remove',
+        element: {
+          type: this.mapNodeTypeToElementType(node.type),
+          name: node.name,
+          path: node.path
+        },
+        lineNumber: node.lineNumber,
+        indentLevel: Math.floor(node.column / 2),
+        content: this.formatNodeAsCoDoc(node),
+        originalContent: this.formatNodeAsCoDoc(node),
+        confidence: 1.0,
+        timestamp
+      });
+    }
+
+    // Process modifications
+    for (const node of diff.modified) {
+      changes.push({
+        id: `modify_${node.id}_${timestamp}`,
+        type: 'modify',
+        element: {
+          type: this.mapNodeTypeToElementType(node.type),
+          name: node.name,
+          path: node.path
+        },
+        lineNumber: node.lineNumber,
+        indentLevel: Math.floor(node.column / 2),
+        content: this.formatNodeAsCoDoc(node),
+        confidence: 1.0,
+        timestamp
+      });
+    }
+
+    // Process renames - distinguish between rename and move
+    for (const rename of diff.renamed) {
+      const fromDir = rename.from.path.split('/').slice(0, -1).join('/');
+      const toDir = rename.to.path.split('/').slice(0, -1).join('/');
+      
+      if (fromDir !== toDir) {
+        // This is a move (path changed)
+        changes.push({
+          id: `move_${rename.to.id}_${timestamp}`,
+          type: 'move',
+          element: {
+            type: this.mapNodeTypeToElementType(rename.to.type),
+            name: rename.to.name,
+            path: rename.to.path
+          },
+          lineNumber: rename.to.lineNumber,
+          indentLevel: Math.floor(rename.to.column / 2),
+          content: this.formatNodeAsCoDoc(rename.to),
+          fromPath: rename.from.path,
+          toPath: rename.to.path,
+          confidence: rename.confidence,
+          timestamp
+        });
+      } else if (rename.from.name !== rename.to.name) {
+        // This is a pure rename (name changed, same location)
+        changes.push({
+          id: `rename_${rename.to.id}_${timestamp}`,
+          type: 'rename',
+          element: {
+            type: this.mapNodeTypeToElementType(rename.to.type),
+            name: rename.to.name,
+            path: rename.to.path
+          },
+          lineNumber: rename.to.lineNumber,
+          indentLevel: Math.floor(rename.to.column / 2),
+          content: this.formatNodeAsCoDoc(rename.to),
+          fromName: rename.from.name,
+          toName: rename.to.name,
+          confidence: rename.confidence,
+          timestamp
+        });
+      }
+    }
+
+    // Detect refactorings (heuristic-based)
+    const refactorChanges = this.detectRefactorings(diff);
+    changes.push(...refactorChanges);
+
+    return changes;
+  }
+
+  /**
+   * Detect refactoring patterns in structural changes
+   */
+  private detectRefactorings(diff: StructuralDiff): AIChange[] {
+    const refactorings: AIChange[] = [];
+    const timestamp = Date.now();
+
+    // Pattern 1: Function extracted (new function + modified calling function)
+    const potentialExtracts = this.findExtractedFunctions(diff);
+    for (const extract of potentialExtracts) {
+      refactorings.push({
+        id: `refactor_extract_${extract.id}_${timestamp}`,
+        type: 'refactor',
+        refactorType: 'extract',
+        element: {
+          type: 'function',
+          name: extract.name,
+          path: extract.path
+        },
+        lineNumber: extract.lineNumber,
+        indentLevel: Math.floor(extract.column / 2),
+        content: this.formatNodeAsCoDoc(extract),
+        confidence: 0.8,
+        timestamp
+      });
+    }
+
+    // Pattern 2: Function inlined (removed function + modified calling function)
+    const potentialInlines = this.findInlinedFunctions(diff);
+    for (const inline of potentialInlines) {
+      refactorings.push({
+        id: `refactor_inline_${inline.id}_${timestamp}`,
+        type: 'refactor',
+        refactorType: 'inline',
+        element: {
+          type: 'function',
+          name: inline.name,
+          path: inline.path
+        },
+        lineNumber: inline.lineNumber,
+        indentLevel: Math.floor(inline.column / 2),
+        content: this.formatNodeAsCoDoc(inline),
+        confidence: 0.7,
+        timestamp
+      });
+    }
+
+    // Pattern 3: Function split (1 removed, N>1 added with similar names/paths)
+    const potentialSplits = this.findSplitFunctions(diff);
+    for (const split of potentialSplits) {
+      refactorings.push({
+        id: `refactor_split_${split.id}_${timestamp}`,
+        type: 'refactor',
+        refactorType: 'split',
+        element: {
+          type: 'function',
+          name: split.name,
+          path: split.path
+        },
+        lineNumber: split.lineNumber,
+        indentLevel: Math.floor(split.column / 2),
+        content: this.formatNodeAsCoDoc(split),
+        confidence: 0.75,
+        timestamp
+      });
+    }
+
+    return refactorings;
+  }
+
+  /**
+   * Find extracted functions (new small functions + modified larger function)
+   */
+  private findExtractedFunctions(diff: StructuralDiff): SchemaNode[] {
+    const extracted: SchemaNode[] = [];
+    
+    // Look for added functions that are small and simple
+    for (const added of diff.added) {
+      if (added.type === 'function') {
+        // Check if there's a modified function in same file
+        const sameFileModified = diff.modified.filter(m => 
+          m.type === 'function' && 
+          this.getFilePath(m.path) === this.getFilePath(added.path)
+        );
+        
+        if (sameFileModified.length > 0) {
+          extracted.push(added);
+        }
+      }
+    }
+    
+    return extracted;
+  }
+
+  /**
+   * Find inlined functions (removed functions + modified caller)
+   */
+  private findInlinedFunctions(diff: StructuralDiff): SchemaNode[] {
+    const inlined: SchemaNode[] = [];
+    
+    for (const removed of diff.removed) {
+      if (removed.type === 'function') {
+        // Check if there's a modified function that might have inlined this
+        const potentialInliners = diff.modified.filter(m =>
+          m.type === 'function' &&
+          this.getFilePath(m.path) === this.getFilePath(removed.path)
+        );
+        
+        if (potentialInliners.length > 0) {
+          inlined.push(removed);
+        }
+      }
+    }
+    
+    return inlined;
+  }
+
+  /**
+   * Find split functions (1 removed, multiple added with related names)
+   */
+  private findSplitFunctions(diff: StructuralDiff): SchemaNode[] {
+    const splits: SchemaNode[] = [];
+    
+    for (const removed of diff.removed) {
+      if (removed.type === 'function') {
+        // Look for multiple added functions with similar name patterns
+        const similarAdded = diff.added.filter(a =>
+          a.type === 'function' &&
+          this.getFilePath(a.path) === this.getFilePath(removed.path) &&
+          this.hasSimilarName(a.name, removed.name)
+        );
+        
+        if (similarAdded.length >= 2) {
+          splits.push(...similarAdded);
+        }
+      }
+    }
+    
+    return splits;
+  }
+
+  /**
+   * Check if two names are similar (for split detection)
+   */
+  private hasSimilarName(name1: string, name2: string): boolean {
+    const lower1 = name1.toLowerCase();
+    const lower2 = name2.toLowerCase();
+    
+    // Check if one contains the other
+    if (lower1.includes(lower2) || lower2.includes(lower1)) {
+      return true;
+    }
+    
+    // Check if they share significant prefix/suffix
+    const words1 = lower1.split(/(?=[A-Z])|_/);
+    const words2 = lower2.split(/(?=[A-Z])|_/);
+    
+    const commonWords = words1.filter(w => words2.includes(w));
+    return commonWords.length >= 2;
+  }
+
+  /**
+   * Extract file path from full path
+   */
+  private getFilePath(path: string): string {
+    // Remove element name after # if present
+    const parts = path.split('#');
+    return parts[0];
+  }
+
+  /**
+   * Map SchemaNode type to element type
+   */
+  private mapNodeTypeToElementType(type: SchemaNode['type']): AIChange['element']['type'] {
+    switch (type) {
+      case 'component':
+        return 'component';
+      case 'function':
+        return 'function';
+      case 'file':
+        return 'file';
+      case 'directory':
+        return 'directory';
+      case 'reference':
+        return 'reference';
+      default:
+        return 'variable';
+    }
+  }
+
+  /**
+   * Format a schema node back into CoDoc syntax
+   */
+  private formatNodeAsCoDoc(node: SchemaNode): string {
+    let prefix = '';
+    
+    switch (node.type) {
+      case 'directory':
+        prefix = '/';
+        break;
+      case 'component':
+        prefix = '%';
+        break;
+      case 'function':
+        return `$${node.name}()`;
+      case 'reference':
+        prefix = '@';
+        break;
+      case 'file':
+        return node.name;
+      case 'note':
+        return `# ${node.content || node.name}`;
+    }
+    
+    return `${prefix}${node.name}`;
   }
 }
 

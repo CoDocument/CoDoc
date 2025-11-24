@@ -9,6 +9,7 @@ import { openCodeService } from '../services/OpenCodeService';
 import { impactAnalysisService } from '../services/ImpactAnalysisService';
 import { codeChangeAnalyzer } from '../services/CodeChangeAnalyzer';
 import { promptPreparationService } from '../services/PromptPreparationService';
+import { MockGenerationService } from '../services/MockGenerationService';
 import { SchemaNode, CodebaseSnapshot, EditorState } from '../types';
 
 export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
@@ -18,6 +19,10 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   private editorState: EditorState | null = null;
   private analysisEngine: AnalysisEngine | null = null;
   private previousContent: string = '';
+  
+  // Store CoDoc snapshot BEFORE generation for AI change detection
+  private preGenerationCoDoc: SchemaNode[] = [];
+  private preGenerationSnapshot: CodebaseSnapshot | null = null;
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -71,7 +76,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
     switch (message.type) {
       case 'contentChanged':
         await this.updateDocument(message.content);
-        await this.analyzeContentChanges(message.content);
+        // No longer track human edits for feedback - only AI changes after generation
         break;
 
       case 'syncCodebase':
@@ -79,11 +84,23 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         break;
 
       case 'generateCode':
+        // Clear previous feedback decorations before generating (assumes user is happy with them)
+        if (this.currentPanel) {
+          this.currentPanel.webview.postMessage({
+            type: 'clearFeedbackDecorations'
+          });
+        }
         await this.generateCode(message.prompt, message.contextFiles);
         break;
 
-      case 'analyzeChanges':
-        await this.analyzeCodeChanges();
+      case 'mockGenerateCode':
+        // Mock generation for testing feedback decorations
+        if (this.currentPanel) {
+          this.currentPanel.webview.postMessage({
+            type: 'clearFeedbackDecorations'
+          });
+        }
+        await this.mockGenerateCode();
         break;
 
       case 'analyzeImpact':
@@ -110,92 +127,76 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
           });
         }
         break;
+
+      case 'requestFeedforward':
+        await this.generateFeedforward(
+          message.content,
+          message.cursorLine,
+          message.cursorColumn,
+          message.parsedSchema
+        );
+        break;
+
+      case 'cancelFeedforward':
+        impactAnalysisService.cancel();
+        break;
     }
   }
 
   /**
-   * Analyze content changes in CoDoc and send feedback decorations
+   * Generate feedforward suggestions based on cursor position and edits
    */
-  private async analyzeContentChanges(newContent: string): Promise<void> {
-    if (!this.currentDocument || !vscode.workspace.workspaceFolders) {
+  private async generateFeedforward(
+    content: string,
+    cursorLine: number,
+    cursorColumn: number,
+    parsedSchema: any[]
+  ): Promise<void> {
+    if (!vscode.workspace.workspaceFolders) {
       return;
     }
 
     const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
 
     try {
-      // Analyze changes between old and new content
-      const changes = await codeChangeAnalyzer.analyzeChanges(
-        this.previousContent,
-        newContent,
-        workspaceRoot
-      );
-
-      // Store new content as previous for next comparison
-      this.previousContent = newContent;
-
-      // Send changes to webview for feedback decorations
-      if (this.currentPanel && changes.length > 0) {
-        this.currentPanel.webview.postMessage({
-          type: 'feedbackChanges',
-          changes: changes.map(change => ({
-            type: change.type,
-            element: {
-              name: change.element.name,
-              type: change.element.type
-            },
-            content: change.content,
-            lineNumber: change.lineNumber,
-            indentLevel: change.indentLevel,
-            id: change.id
-          }))
-        });
+      // Initialize analysis engine if not already done
+      if (!this.analysisEngine) {
+        this.analysisEngine = new AnalysisEngine(workspaceRoot);
+        await this.analysisEngine.scanCodebase();
       }
-    } catch (error) {
-      console.error('Failed to analyze content changes:', error);
-    }
-  }
 
-  /**
-   * Analyze code changes after generation
-   */
-  private async analyzeCodeChanges(): Promise<void> {
-    if (!this.currentDocument || !vscode.workspace.workspaceFolders) {
-      return;
-    }
-
-    const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-    const oldContent = this.previousContent;
-    const newContent = this.currentDocument.getText();
-
-    try {
-      const changes = await codeChangeAnalyzer.analyzeChanges(
-        oldContent,
-        newContent,
-        workspaceRoot
-      );
-
-      this.previousContent = newContent;
-
-      // Send changes to webview
-      if (this.currentPanel && changes.length > 0) {
-        this.currentPanel.webview.postMessage({
-          type: 'feedbackChanges',
-          changes: changes.map(change => ({
-            type: change.type,
-            element: {
-              name: change.element.name,
-              type: change.element.type
-            },
-            content: change.content,
-            lineNumber: change.lineNumber,
-            indentLevel: change.indentLevel,
-            id: change.id
-          }))
-        });
+      // Get OpenAI API key from configuration
+      const apiKey = vscode.workspace.getConfiguration('codoc').get<string>('openaiApiKey');
+      if (!apiKey) {
+        console.warn('OpenAI API key not configured');
+        return;
       }
+
+      // Get dependency graph from analysis engine
+      const snapshot = await this.analysisEngine.scanCodebase();
+      const dependencyGraph = snapshot.dependencyGraph;
+
+      // Generate feedforward suggestions
+      impactAnalysisService.generateFeedforwardSuggestions(
+        content,
+        cursorLine,
+        cursorColumn,
+        parsedSchema,
+        dependencyGraph,
+        apiKey,
+        undefined, // rejectedPatterns
+        (suggestions) => {
+          // Send suggestions to webview
+          if (this.currentPanel) {
+            this.currentPanel.webview.postMessage({
+              type: 'feedforwardSuggestions',
+              suggestions
+            });
+          }
+        }
+      );
     } catch (error) {
-      console.error('Failed to analyze code changes:', error);
+      console.error('Failed to generate feedforward:', error);
     }
   }
 
@@ -327,6 +328,87 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   }
 
   /**
+   * Mock code generation for testing feedback decorations
+   * Simulates AI generating code step-by-step to show decorations building up
+   */
+  async mockGenerateCode(): Promise<void> {
+    if (!vscode.workspace.workspaceFolders) {
+      vscode.window.showErrorMessage('No workspace folder open');
+      return;
+    }
+
+    if (!this.currentDocument) {
+      vscode.window.showErrorMessage('No CoDoc document open');
+      return;
+    }
+
+    try {
+      const workDir = vscode.workspace.workspaceFolders[0].uri.fsPath;
+
+      // STEP 1: Store snapshot BEFORE generation for AI change detection
+      if (!this.analysisEngine) {
+        this.analysisEngine = new AnalysisEngine(workDir);
+      }
+      
+      this.preGenerationSnapshot = await this.analysisEngine.scanCodebase();
+      this.preGenerationCoDoc = this.analysisEngine.constructCodoc(this.preGenerationSnapshot);
+
+      vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Mock generating code...',
+        cancellable: false
+      }, async (progress) => {
+        const mockService = new MockGenerationService(workDir);
+
+        // Run mock generation with progress callbacks
+        await mockService.runMockGeneration((step: string) => {
+          progress.report({ message: step });
+        });
+
+        progress.report({ message: 'Rescanning codebase...' });
+
+        // Wait a moment for file system to settle
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // STEP 2: Rescan codebase and reconstruct new CoDoc (AI changes reflected here)
+        await this.rescanAndUpdateCoDoc();
+
+        progress.report({ message: 'Analyzing AI-generated changes...' });
+
+        // STEP 3: Compare pre-generation CoDoc with post-generation CoDoc
+        const postGenerationSnapshot = await this.analysisEngine!.scanCodebase();
+        const postGenerationCoDoc = this.analysisEngine!.constructCodoc(postGenerationSnapshot);
+        console.log('Post generation CoDoc:', postGenerationCoDoc);
+
+        // Use StructuralDiffEngine to identify ALL changes
+        const diff = structuralDiffEngine.compare(this.preGenerationCoDoc, postGenerationCoDoc);
+        console.log('Mock generation structural diff:', diff);
+
+        // Convert structural diff to AIChange[] with comprehensive classification
+        const aiChanges = structuralDiffEngine.convertToAIChanges(diff);
+        console.log('Mock generation AI changes:', aiChanges);
+
+        progress.report({ message: 'Displaying AI feedback...' });
+
+        // Send AI changes to webview for feedback decorations
+        if (this.currentPanel) {
+          this.currentPanel.webview.postMessage({
+            type: 'showFeedbackDecorations',
+            changes: aiChanges
+          });
+        }
+
+        vscode.window.showInformationMessage(
+          `✓ Mock generation complete! ${aiChanges.length} AI changes detected.`
+        );
+      });
+    } catch (error) {
+      vscode.window.showErrorMessage(`Mock generation failed: ${error}`);
+      console.error('Mock generation error:', error);
+    }
+  }
+
+  /**
    * Serialize schema to CoDoc format (alias for generateCodocContent)
    */
   private serializeSchema(nodes: SchemaNode[]): string {
@@ -394,25 +476,17 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
-    // Check OpenCode auth
-    // const isAuthenticated = await openCodeService.checkAuth();
-    // if (!isAuthenticated) {
-    //   const action = await vscode.window.showErrorMessage(
-    //     'OpenCode CLI not authenticated. Please run "opencode login" in terminal.',
-    //     'Open Terminal'
-    //   );
-      
-    //   if (action === 'Open Terminal') {
-    //     const terminal = vscode.window.createTerminal('OpenCode');
-    //     terminal.show();
-    //     terminal.sendText('opencode login');
-    //   }
-    //   return;
-    // }
-
     try {
       const workDir = vscode.workspace.workspaceFolders[0].uri.fsPath;
       const currentContent = this.currentDocument.getText();
+
+      // STEP 1: Store snapshot BEFORE generation for AI change detection
+      if (!this.analysisEngine) {
+        this.analysisEngine = new AnalysisEngine(workDir);
+      }
+      
+      this.preGenerationSnapshot = await this.analysisEngine.scanCodebase();
+      this.preGenerationCoDoc = this.analysisEngine.constructCodoc(this.preGenerationSnapshot);
 
       // Get last generation summary from history
       const history = await openCodeService.loadHistory(workDir);
@@ -476,36 +550,28 @@ ${prompt}`;
           // Wait a moment for file system to settle
           await new Promise(resolve => setTimeout(resolve, 1000));
 
-          // Rescan codebase and reconstruct new CoDoc
+          // STEP 2: Rescan codebase and reconstruct new CoDoc (AI changes reflected here)
           await this.rescanAndUpdateCoDoc();
 
-          progress.report({ message: 'Analyzing changes...' });
+          progress.report({ message: 'Analyzing AI-generated changes...' });
 
-          // Analyze changes between old and new CoDoc
-          const changes = await codeChangeAnalyzer.analyzeChanges(
-            currentContent,
-            this.currentDocument!.getText(),
-            workDir
-          );
+          // STEP 3: Compare pre-generation CoDoc with post-generation CoDoc
+          const postGenerationSnapshot = await this.analysisEngine!.scanCodebase();
+          const postGenerationCoDoc = this.analysisEngine!.constructCodoc(postGenerationSnapshot);
 
-          progress.report({ message: 'Displaying feedback...' });
+          // Use StructuralDiffEngine to identify ALL changes
+          const diff = structuralDiffEngine.compare(this.preGenerationCoDoc, postGenerationCoDoc);
+          
+          // Convert structural diff to AIChange[] with comprehensive classification
+          const aiChanges = structuralDiffEngine.convertToAIChanges(diff);
 
-          // Send changes to webview for feedback decorations
+          progress.report({ message: 'Displaying AI feedback...' });
+
+          // Send AI changes to webview for feedback decorations
           if (this.currentPanel) {
             this.currentPanel.webview.postMessage({
               type: 'showFeedbackDecorations',
-              changes: changes.map(change => ({
-                type: change.type,
-                element: {
-                  type: change.element.type,
-                  name: change.element.name,
-                  path: change.element.path
-                },
-                content: change.content,
-                lineNumber: change.lineNumber,
-                indentLevel: change.indentLevel,
-                id: change.id
-              }))
+              changes: aiChanges
             });
 
             this.currentPanel.webview.postMessage({
@@ -516,7 +582,7 @@ ${prompt}`;
           }
 
           vscode.window.showInformationMessage(
-            `✓ Code generation complete! ${changes.length} changes detected in CoDoc structure.`
+            `✓ Code generation complete! ${aiChanges.length} AI changes detected in CoDoc structure.`
           );
         } else {
           vscode.window.showErrorMessage(`Generation failed: ${response.error}`);

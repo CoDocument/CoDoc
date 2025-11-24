@@ -19,27 +19,47 @@ import {
 } from "@codemirror/state";
 // import { CodocMergeChange } from "../../lib/services/codocMergeService";
 
+/**
+ * AI-generated change for feedback decorations
+ * Only represents changes made by AI, not human edits
+ * Matches backend AIChange interface
+ */
 export interface CodocMergeChange {
-  type: 'add' | 'modify' | 'remove';
+  id: string;
+  type: 'add' | 'remove' | 'modify' | 'rename' | 'move' | 'refactor';
+  
   element: {
     type: 'component' | 'function' | 'variable' | 'file' | 'directory' | 'reference';
     name: string;
-    path?: string;
+    path: string;
   };
+  
+  // Location in CoDoc
+  lineNumber: number;
+  indentLevel: number;
+  
+  // Content for display
   content?: string;
-  lineNumber?: number;
-  indentLevel?: number;
-  id?: string; // Unique identifier for the change
-  originalContent?: string; // For reverting changes
+  originalContent?: string;
+  
+  // For rename/move operations
+  fromPath?: string;
+  toPath?: string;
+  fromName?: string;
+  toName?: string;
+  
+  // For refactoring
+  refactorType?: 'extract' | 'inline' | 'split' | 'merge' | 'restructure';
+  
+  // Metadata
+  confidence?: number;
+  timestamp?: number;
 }
 
-// State effect to set feedback decorations (ACCUMULATES changes across generations)
+// State effect to set feedback decorations (REPLACES all changes - used on generate)
 export const setFeedbackDecorations = StateEffect.define<CodocMergeChange[]>();
 
-// State effect to add feedback decorations (MERGES with existing, for incremental updates)
-export const addFeedbackDecorations = StateEffect.define<CodocMergeChange[]>();
-
-// State effect to clear feedback decorations (only used when generate button is pressed)
+// State effect to clear feedback decorations (used when generate button is pressed)
 export const clearFeedbackDecorations = StateEffect.define<void>();
 
 // State effect to reject a specific change
@@ -53,22 +73,11 @@ const feedbackChangesField = StateField.define<CodocMergeChange[]>({
   update(changes, tr) {
     for (const effect of tr.effects) {
       if (effect.is(setFeedbackDecorations)) {
-        // REPLACE all changes (used for initial feedback or when content changes significantly)
+        // REPLACE all changes (used after generation completes)
         return effect.value.map((change, index) => ({
           ...change,
           id: change.id || `change-${Date.now()}-${index}`
         }));
-      }
-      if (effect.is(addFeedbackDecorations)) {
-        // MERGE new changes with existing ones (for incremental generation)
-        const newChanges = effect.value.map((change, index) => ({
-          ...change,
-          id: change.id || `change-${Date.now()}-${index}`
-        }));
-        // Remove duplicates based on element name and type, keeping the newer ones
-        const existingMap = new Map(changes.map(c => [`${c.element.type}:${c.element.name}`, c]));
-        newChanges.forEach(nc => existingMap.set(`${nc.element.type}:${nc.element.name}`, nc));
-        return Array.from(existingMap.values());
       }
       if (effect.is(clearFeedbackDecorations)) {
         return [];
@@ -93,6 +102,21 @@ const modifiedLine = Decoration.line({
   attributes: { "data-feedback-type": "modified" }
 });
 
+const renamedLine = Decoration.line({
+  class: "cm-feedbackRenamedLine",
+  attributes: { "data-feedback-type": "renamed" }
+});
+
+const movedLine = Decoration.line({
+  class: "cm-feedbackMovedLine",
+  attributes: { "data-feedback-type": "moved" }
+});
+
+const refactoredLine = Decoration.line({
+  class: "cm-feedbackRefactoredLine",
+  attributes: { "data-feedback-type": "refactored" }
+});
+
 // Note: removedLine decoration is handled by widget instead of line decoration
 // const removedLine = Decoration.line({
 //   class: "cm-feedbackRemovedLine", 
@@ -110,6 +134,18 @@ const modifiedGutterMarker = new class extends GutterMarker {
 
 const removedGutterMarker = new class extends GutterMarker {
   elementClass = "cm-feedbackRemovedGutter";
+}();
+
+const renamedGutterMarker = new class extends GutterMarker {
+  elementClass = "cm-feedbackRenamedGutter";
+}();
+
+const movedGutterMarker = new class extends GutterMarker {
+  elementClass = "cm-feedbackMovedGutter";
+}();
+
+const refactoredGutterMarker = new class extends GutterMarker {
+  elementClass = "cm-feedbackRefactoredGutter";
 }();
 
 // Widget for deleted content (similar to deletionWidget)
@@ -170,7 +206,12 @@ class FeedbackDeletionWidget extends WidgetType {
 
 // Widget for hover buttons on added/modified lines
 class FeedbackHoverButtonWidget extends WidgetType {
-  constructor(private changeType: 'add' | 'modify', private changeId: string, private view: EditorView, private originalContent?: string) {
+  constructor(
+    private changeType: 'add' | 'modify' | 'rename' | 'move' | 'refactor', 
+    private changeId: string, 
+    private view: EditorView, 
+    private originalContent?: string
+  ) {
     super();
   }
 
@@ -180,8 +221,31 @@ class FeedbackHoverButtonWidget extends WidgetType {
     
     const button = dom.appendChild(document.createElement("button"));
     button.className = "cm-feedbackRejectButton";
-    button.textContent = this.changeType === 'add' ? "✕" : "↶";
-    button.title = this.changeType === 'add' ? "Remove this addition" : "Revert this change";
+    
+    // Set button text and title based on change type
+    switch (this.changeType) {
+      case 'add':
+        button.textContent = "✕";
+        button.title = "Remove this addition";
+        break;
+      case 'modify':
+        button.textContent = "↶";
+        button.title = "Revert this change";
+        break;
+      case 'rename':
+        button.textContent = "↶";
+        button.title = `Revert rename (was: ${this.originalContent || 'unknown'})`;
+        break;
+      case 'move':
+        button.textContent = "↶";
+        button.title = `Revert move (from: ${this.originalContent || 'unknown'})`;
+        break;
+      case 'refactor':
+        button.textContent = "↶";
+        button.title = `Revert refactor (${this.originalContent || 'refactor'})`;
+        break;
+    }
+    
     button.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -359,9 +423,16 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
       line = doc.line(doc.lines);
     }
     
-    // Prioritize changes: remove > modify > add
+    // Prioritize changes: remove > refactor > move > rename > modify > add
     const sortedLineChanges = lineChanges.sort((a, b) => {
-      const priority: { [key: string]: number } = { 'remove': 3, 'modify': 2, 'add': 1 };
+      const priority: { [key: string]: number } = { 
+        'remove': 6, 
+        'refactor': 5,
+        'move': 4, 
+        'rename': 3,
+        'modify': 2, 
+        'add': 1 
+      };
       return (priority[b.type] || 0) - (priority[a.type] || 0);
     });
     
@@ -393,6 +464,45 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
           side: 1
         });
         builder.add(line.to, line.to, modifyHoverWidget);
+        break;
+      
+      case 'rename':
+        // Add renamed line decoration and gutter marker
+        builder.add(line.from, line.from, renamedLine);
+        gutterBuilder.add(line.from, line.from, renamedGutterMarker);
+        
+        // Add hover button widget
+        const renameHoverWidget = Decoration.widget({
+          widget: new FeedbackHoverButtonWidget('rename', primaryChange.id || 'unknown', view, primaryChange.fromName),
+          side: 1
+        });
+        builder.add(line.to, line.to, renameHoverWidget);
+        break;
+      
+      case 'move':
+        // Add moved line decoration and gutter marker
+        builder.add(line.from, line.from, movedLine);
+        gutterBuilder.add(line.from, line.from, movedGutterMarker);
+        
+        // Add hover button widget
+        const moveHoverWidget = Decoration.widget({
+          widget: new FeedbackHoverButtonWidget('move', primaryChange.id || 'unknown', view, primaryChange.fromPath),
+          side: 1
+        });
+        builder.add(line.to, line.to, moveHoverWidget);
+        break;
+      
+      case 'refactor':
+        // Add refactored line decoration and gutter marker
+        builder.add(line.from, line.from, refactoredLine);
+        gutterBuilder.add(line.from, line.from, refactoredGutterMarker);
+        
+        // Add hover button widget
+        const refactorHoverWidget = Decoration.widget({
+          widget: new FeedbackHoverButtonWidget('refactor', primaryChange.id || 'unknown', view, primaryChange.refactorType),
+          side: 1
+        });
+        builder.add(line.to, line.to, refactorHoverWidget);
         break;
         
       case 'remove':
@@ -478,6 +588,30 @@ export const feedbackTheme = EditorView.baseTheme({
     position: "relative"
   },
   
+  // Renamed line styling (blue)
+  ".cm-feedbackRenamedLine": {
+    backgroundColor: "rgba(58, 150, 221, 0.15)",
+    borderLeft: "3px solid rgba(58, 150, 221, 0.6)",
+    paddingLeft: "4px",
+    position: "relative"
+  },
+  
+  // Moved line styling (purple)
+  ".cm-feedbackMovedLine": {
+    backgroundColor: "rgba(147, 112, 219, 0.15)",
+    borderLeft: "3px solid rgba(147, 112, 219, 0.6)",
+    paddingLeft: "4px",
+    position: "relative"
+  },
+  
+  // Refactored line styling (teal)
+  ".cm-feedbackRefactoredLine": {
+    backgroundColor: "rgba(0, 150, 136, 0.15)",
+    borderLeft: "3px solid rgba(0, 150, 136, 0.6)",
+    paddingLeft: "4px",
+    position: "relative"
+  },
+  
   // Removed line styling (red with strikethrough effect)
   ".cm-feedbackRemovedLine": {
     backgroundColor: "rgba(238, 68, 51, 0.1)",
@@ -519,6 +653,21 @@ export const feedbackTheme = EditorView.baseTheme({
     borderRadius: "2px"
   },
   
+  ".cm-feedbackRenamedGutter": {
+    background: "#3a96dd",
+    borderRadius: "2px"
+  },
+  
+  ".cm-feedbackMovedGutter": {
+    background: "#9370db",
+    borderRadius: "2px"
+  },
+  
+  ".cm-feedbackRefactoredGutter": {
+    background: "#009688",
+    borderRadius: "2px"
+  },
+  
   ".cm-feedbackRemovedGutter": {
     background: "#ee4433",
     borderRadius: "2px"
@@ -540,7 +689,7 @@ export const feedbackTheme = EditorView.baseTheme({
     pointerEvents: "auto"
   },
   
-  ".cm-feedbackAddedLine:hover .cm-feedbackHoverButton, .cm-feedbackModifiedLine:hover .cm-feedbackHoverButton": {
+  ".cm-feedbackAddedLine:hover .cm-feedbackHoverButton, .cm-feedbackModifiedLine:hover .cm-feedbackHoverButton, .cm-feedbackRenamedLine:hover .cm-feedbackHoverButton, .cm-feedbackMovedLine:hover .cm-feedbackHoverButton, .cm-feedbackRefactoredLine:hover .cm-feedbackHoverButton": {
     opacity: "1",
     pointerEvents: "auto"
   },
@@ -579,6 +728,21 @@ export const feedbackTheme = EditorView.baseTheme({
     borderLeft: "3px solid rgba(255, 165, 0, 0.8)"
   },
   
+  "&dark .cm-feedbackRenamedLine": {
+    backgroundColor: "rgba(58, 150, 221, 0.2)",
+    borderLeft: "3px solid rgba(58, 150, 221, 0.8)"
+  },
+  
+  "&dark .cm-feedbackMovedLine": {
+    backgroundColor: "rgba(147, 112, 219, 0.2)",
+    borderLeft: "3px solid rgba(147, 112, 219, 0.8)"
+  },
+  
+  "&dark .cm-feedbackRefactoredLine": {
+    backgroundColor: "rgba(0, 150, 136, 0.2)",
+    borderLeft: "3px solid rgba(0, 150, 136, 0.8)"
+  },
+  
   "&dark .cm-feedbackRemovedLine": {
     backgroundColor: "rgba(238, 68, 51, 0.15)",
   },
@@ -602,6 +766,18 @@ export const feedbackTheme = EditorView.baseTheme({
   
   "&dark .cm-feedbackModifiedGutter": {
     background: "#ffbb33"
+  },
+  
+  "&dark .cm-feedbackRenamedGutter": {
+    background: "#5ab4f5"
+  },
+  
+  "&dark .cm-feedbackMovedGutter": {
+    background: "#b399e3"
+  },
+  
+  "&dark .cm-feedbackRefactoredGutter": {
+    background: "#00bfa5"
   },
   
   "&dark .cm-feedbackRemovedGutter": {
@@ -628,18 +804,9 @@ export function feedbackDecorationExtension() {
 }
 
 // Helper functions to control the decorations from outside
-export function showFeedbackDecorationsInView(view: EditorView, changes: CodocMergeChange[]) {
-  // console.log('🎨 [FeedbackDecorations] Changes:', changes.map(c => `${c.element.name} (${c.type}) line:${c.lineNumber}: ${c.content}`));
-  
+export function showFeedbackDecorationsInView(view: EditorView, changes: CodocMergeChange[]) {  
   view.dispatch({
     effects: setFeedbackDecorations.of(changes)
-  });
-}
-
-// Add new changes to existing decorations (for incremental generation)
-export function addFeedbackDecorationsInView(view: EditorView, changes: CodocMergeChange[]) {
-  view.dispatch({
-    effects: addFeedbackDecorations.of(changes)
   });
 }
 

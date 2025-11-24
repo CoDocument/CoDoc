@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { CodocEditorProvider } from './providers/CodocEditorProvider';
 import { AnalysisEngine } from './services/AnalysisEngine';
+import { openCodeService } from './services/OpenCodeService';
 
 let editorProvider: CodocEditorProvider;
 let fileWatcher: vscode.FileSystemWatcher | undefined;
@@ -80,6 +81,8 @@ export function deactivate() {
   if (fileWatcher) {
     fileWatcher.dispose();
   }
+  // Dispose OpenCode terminal
+  openCodeService.dispose();
 }
 
 /**

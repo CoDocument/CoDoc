@@ -21,3 +21,16 @@ export interface SuggestedChange {
   insertLine: number;
   indentLevel: number;
 }
+
+export interface FeedforwardSuggestion {
+  id: string;
+  text: string;
+  insertLine: number;
+  indentLevel: number;
+  type: 'component' | 'function' | 'variable' | 'file' | 'directory' | 'reference';
+  fullPath: string;
+  parent?: string;
+  groupId?: string;
+  groupItems?: string[];
+  sequence?: number;
+}
