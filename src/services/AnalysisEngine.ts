@@ -65,6 +65,10 @@ export class AnalysisEngine {
       allFiles.push(...files);
     }
 
+    allFiles.sort((a, b) =>
+      a.fsPath.localeCompare(b.fsPath, undefined, { sensitivity: 'base' })
+    );
+
     // Analyze each file
     for (const fileUri of allFiles) {
       try {
@@ -76,6 +80,10 @@ export class AnalysisEngine {
         console.warn(`Failed to analyze ${fileUri.fsPath}:`, error);
       }
     }
+
+    snapshot.files.sort((a, b) =>
+      a.path.localeCompare(b.path, undefined, { sensitivity: 'base' })
+    );
 
     // Build dependency graph
     snapshot.dependencyGraph = this.buildDependencyGraph(snapshot.files);
@@ -568,7 +576,9 @@ export class AnalysisEngine {
       console.warn('Failed to scan directories:', error);
     }
     
-    return Array.from(dirs).sort();
+    return Array.from(dirs).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
   }
   
   /**
@@ -629,6 +639,9 @@ export class AnalysisEngine {
       this.ensureDirectoryExists(root, dir);
     }
 
+    // Sort nodes to match VS Code explorer ordering before assigning line numbers
+    this.sortSchemaNodes(root.children);
+
     // Assign line numbers based on serialization order
     this.assignLineNumbers(root.children || [], 1);
 
@@ -687,6 +700,48 @@ export class AnalysisEngine {
     }
     
     return currentLine;
+  }
+
+  /**
+   * Sort schema nodes to match VS Code explorer ordering (directories first, alphabetical)
+   */
+  private sortSchemaNodes(nodes?: SchemaNode[]): void {
+    if (!nodes || nodes.length === 0) {
+      return;
+    }
+
+    nodes.sort((a, b) => this.compareSchemaNodes(a, b));
+
+    for (const node of nodes) {
+      if (node.type !== 'file' && node.children && node.children.length > 0) {
+        this.sortSchemaNodes(node.children);
+      }
+    }
+  }
+
+  private compareSchemaNodes(a: SchemaNode, b: SchemaNode): number {
+    const weightDiff = this.getNodeSortWeight(a) - this.getNodeSortWeight(b);
+    if (weightDiff !== 0) {
+      return weightDiff;
+    }
+
+    const nameCompare = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    if (nameCompare !== 0) {
+      return nameCompare;
+    }
+
+    return (a.path || '').localeCompare(b.path || '', undefined, { sensitivity: 'base' });
+  }
+
+  private getNodeSortWeight(node: SchemaNode): number {
+    switch (node.type) {
+      case 'directory':
+        return 0;
+      case 'file':
+        return 1;
+      default:
+        return 2;
+    }
   }
 
   /**

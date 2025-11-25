@@ -150,6 +150,15 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         await this.clearFeedbackDecoration(message.changeId);
         break;
 
+      case 'rejectFeedbackChange':
+        // Handle different rejection types
+        await this.handleFeedbackRejection(
+          message.changeId, 
+          message.changeType, 
+          message.content
+        );
+        break;
+
       case 'revertFeedbackChange':
         await this.revertFeedbackChange(message.changeId, message.originalContent);
         break;
@@ -268,9 +277,21 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     try {
+      // Capture current cursor position and the node it's on
+      let cursorNodePath: string | null = null;
+      if (this.currentDocument && this.previousSchema.length > 0) {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document === this.currentDocument) {
+          const cursorLine = editor.selection.active.line + 1; // 1-indexed
+          const nodeAtCursor = this.findNodeAtLine(this.previousSchema, cursorLine);
+          if (nodeAtCursor) {
+            cursorNodePath = nodeAtCursor.path;
+          }
+        }
+      }
+
       await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: 'Syncing codebase...',
+        location: vscode.ProgressLocation.Window,
         cancellable: false
       }, async () => {
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
@@ -314,16 +335,26 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
             parsedSchema: newSchema
           });
 
+          // Find new line number for cursor node if it still exists
+          let newCursorLine: number | undefined;
+          if (cursorNodePath) {
+            const newNode = this.findNodeByPath(newSchema, cursorNodePath);
+            if (newNode) {
+              newCursorLine = newNode.lineNumber;
+            }
+          }
+
           this.currentPanel.webview.postMessage({
             type: 'contentUpdate',
             content: codocContent,
-            preserveCursor: true
+            preserveCursor: true,
+            newCursorLine
           });
         }
 
-        vscode.window.showInformationMessage(
-          `Synced ${snapshot.files.length} files with dependency graph`
-        );
+        // vscode.window.showInformationMessage(
+        //   `Synced ${snapshot.files.length} files with dependency graph`
+        // );
       });
     } catch (error) {
       vscode.window.showErrorMessage(`Sync failed: ${error}`);
@@ -769,7 +800,11 @@ ${prompt}`;
         dependencyGraph
       );
 
-      await this.syncCodebase();
+      // Note: Do NOT call syncCodebase() here as it causes cursor jumping
+      // during manual edits. syncCodebase() is only for:
+      // 1. Initial document load
+      // 2. After AI code generation
+      // 3. Explicit user "Sync Codebase" button click
 
       if (!syncResult.success) {
         vscode.window.showWarningMessage(
@@ -851,6 +886,26 @@ ${prompt}`;
   }
 
   /**
+   * Find node by path (used for cursor restoration after reordering)
+   */
+  private findNodeByPath(nodes: SchemaNode[], path: string): SchemaNode | null {
+    for (const node of nodes) {
+      if (node.path === path) {
+        return node;
+      }
+
+      if (node.children) {
+        const found = this.findNodeByPath(node.children, path);
+        if (found) {
+          return found;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Clear a specific feedback decoration (change accepted)
    */
   private async clearFeedbackDecoration(changeId: string): Promise<void> {
@@ -859,6 +914,41 @@ ${prompt}`;
         type: 'rejectFeedbackChange',
         changeId
       });
+    }
+  }
+
+  /**
+   * Handle feedback rejection - user rejected a change
+   * For additions: element is already removed from CoDoc by frontend, trigger file sync
+   * For removals: element is already restored to CoDoc by frontend, trigger file sync
+   * For modifications: need to revert the code change
+   */
+  private async handleFeedbackRejection(
+    changeId: string, 
+    changeType: string, 
+    content?: string
+  ): Promise<void> {
+    if (!this.currentDocument) {
+      return;
+    }
+
+    try {
+      // The frontend already modified the CoDoc content
+      // Now we need to sync these changes with the file system
+      
+      // Debounce the sync to allow multiple rejections to batch
+      if (this.syncDebounceTimer) {
+        clearTimeout(this.syncDebounceTimer);
+      }
+
+      this.syncDebounceTimer = setTimeout(async () => {
+        await this.syncCodebase();
+        vscode.window.showInformationMessage(`Change ${changeType} reverted and synced`);
+      }, 500); // Short debounce for rejections
+
+    } catch (error) {
+      console.error('Failed to handle feedback rejection:', error);
+      vscode.window.showErrorMessage(`Failed to revert ${changeType} change`);
     }
   }
 

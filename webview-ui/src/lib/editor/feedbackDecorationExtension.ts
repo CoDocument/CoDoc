@@ -148,20 +148,28 @@ const refactoredGutterMarker = new class extends GutterMarker {
   elementClass = "cm-feedbackRefactoredGutter";
 }();
 
-// Widget for deleted content (similar to deletionWidget)
+// Widget for deleted content (compact, indented, gray strikethrough)
 class FeedbackDeletionWidget extends WidgetType {
-  constructor(private content: string, private elementName: string, private changeId: string, private view: EditorView) {
+  constructor(
+    private change: CodocMergeChange,
+    private view: EditorView
+  ) {
     super();
   }
 
   toDOM(view: EditorView): HTMLElement {
     const dom = document.createElement("div");
     dom.className = "cm-feedbackDeletedChunk";
-    
-    // Add reject button container
-    const buttonContainer = dom.appendChild(document.createElement("div"));
-    buttonContainer.className = "cm-feedbackButtonContainer";
-    
+
+    const indentLevel = this.change.indentLevel || 0;
+    const contentText = (this.change.content || '').split('\n')[0] || this.change.element.name;
+    // Calculate indentation (2 spaces per indent level)
+    const indentSpaces = '  '.repeat(indentLevel);
+
+    // Add reject button (only visible on hover)
+    const buttonContainer = dom.appendChild(document.createElement("span"));
+    buttonContainer.className = "cm-feedbackButtonContainer cm-feedbackDeletedButton";
+
     const rejectButton = buttonContainer.appendChild(document.createElement("button"));
     rejectButton.className = "cm-feedbackRejectButton";
     rejectButton.textContent = "✕";
@@ -169,48 +177,41 @@ class FeedbackDeletionWidget extends WidgetType {
     rejectButton.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      console.log('rejecting change', this.changeId);
+      const changeId = this.change.id || 'unknown';
       this.view.dispatch({
-        effects: rejectFeedbackChange.of({ changeId: this.changeId })
+        effects: rejectFeedbackChange.of({ changeId })
       });
-      // Dispatch custom event for parent component to handle content restoration
+      const detailChange = {
+        ...this.change,
+        element: { ...this.change.element }
+      };
       window.dispatchEvent(new CustomEvent('feedbackChangeRejected', {
-        detail: { changeId: this.changeId, type: 'remove', content: this.content, elementName: this.elementName }
+        detail: { change: detailChange }
       }));
     };
-    
-    if (this.content.trim()) {
-      const contentDiv = dom.appendChild(document.createElement("div"));
-      contentDiv.className = "cm-feedbackDeletedContent";
-      
-      // Split content into lines and add strikethrough
-      const lines = this.content.split('\n');
-      lines.forEach((line, index) => {
-        if (index > 0) {
-          contentDiv.appendChild(document.createElement("br"));
-        }
-        const lineSpan = contentDiv.appendChild(document.createElement("del"));
-        lineSpan.className = "cm-feedbackDeletedText";
-        lineSpan.textContent = line;
-      });
+
+    if (contentText.trim()) {
+      const contentSpan = dom.appendChild(document.createElement("span"));
+      contentSpan.className = "cm-feedbackDeletedText";
+
+      // Apply indentation and show content inline with strikethrough
+      contentSpan.textContent = indentSpaces + contentText.trim();
     }
-    
+
     return dom;
   }
 
   get estimatedHeight() {
-    const lines = this.content.split('\n').length;
-    return Math.max(40, lines * 20 + 30); // Header + content
+    // Compact single-line widget
+    return 18;
   }
 }
 
 // Widget for hover buttons on added/modified lines
 class FeedbackHoverButtonWidget extends WidgetType {
   constructor(
-    private changeType: 'add' | 'modify' | 'rename' | 'move' | 'refactor', 
-    private changeId: string, 
-    private view: EditorView, 
-    private originalContent?: string
+    private change: CodocMergeChange,
+    private view: EditorView
   ) {
     super();
   }
@@ -223,7 +224,7 @@ class FeedbackHoverButtonWidget extends WidgetType {
     button.className = "cm-feedbackRejectButton";
     
     // Set button text and title based on change type
-    switch (this.changeType) {
+    switch (this.change.type) {
       case 'add':
         button.textContent = "✕";
         button.title = "Remove this addition";
@@ -234,31 +235,32 @@ class FeedbackHoverButtonWidget extends WidgetType {
         break;
       case 'rename':
         button.textContent = "↶";
-        button.title = `Revert rename (was: ${this.originalContent || 'unknown'})`;
+        button.title = `Revert rename (was: ${this.change.fromName || this.change.originalContent || 'unknown'})`;
         break;
       case 'move':
         button.textContent = "↶";
-        button.title = `Revert move (from: ${this.originalContent || 'unknown'})`;
+        button.title = `Revert move (from: ${this.change.fromPath || this.change.originalContent || 'unknown'})`;
         break;
       case 'refactor':
         button.textContent = "↶";
-        button.title = `Revert refactor (${this.originalContent || 'refactor'})`;
+        button.title = `Revert refactor (${this.change.refactorType || this.change.originalContent || 'refactor'})`;
         break;
     }
     
     button.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const changeId = this.change.id || 'unknown';
       this.view.dispatch({
-        effects: rejectFeedbackChange.of({ changeId: this.changeId })
+        effects: rejectFeedbackChange.of({ changeId })
       });
       // Dispatch custom event for parent component to handle content restoration
+      const detailChange = {
+        ...this.change,
+        element: { ...this.change.element }
+      };
       window.dispatchEvent(new CustomEvent('feedbackChangeRejected', {
-        detail: { 
-          changeId: this.changeId, 
-          type: this.changeType, 
-          originalContent: this.originalContent 
-        }
+        detail: { change: detailChange }
       }));
     };
     
@@ -447,7 +449,7 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
         
         // Add hover button widget at the end of the line
         const addHoverWidget = Decoration.widget({
-          widget: new FeedbackHoverButtonWidget('add', primaryChange.id || 'unknown', view),
+          widget: new FeedbackHoverButtonWidget(primaryChange, view),
           side: 1
         });
         builder.add(line.to, line.to, addHoverWidget);
@@ -460,7 +462,7 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
         
         // Add hover button widget at the end of the line
         const modifyHoverWidget = Decoration.widget({
-          widget: new FeedbackHoverButtonWidget('modify', primaryChange.id || 'unknown', view, primaryChange.originalContent),
+          widget: new FeedbackHoverButtonWidget(primaryChange, view),
           side: 1
         });
         builder.add(line.to, line.to, modifyHoverWidget);
@@ -473,7 +475,7 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
         
         // Add hover button widget
         const renameHoverWidget = Decoration.widget({
-          widget: new FeedbackHoverButtonWidget('rename', primaryChange.id || 'unknown', view, primaryChange.fromName),
+          widget: new FeedbackHoverButtonWidget(primaryChange, view),
           side: 1
         });
         builder.add(line.to, line.to, renameHoverWidget);
@@ -486,7 +488,7 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
         
         // Add hover button widget
         const moveHoverWidget = Decoration.widget({
-          widget: new FeedbackHoverButtonWidget('move', primaryChange.id || 'unknown', view, primaryChange.fromPath),
+          widget: new FeedbackHoverButtonWidget(primaryChange, view),
           side: 1
         });
         builder.add(line.to, line.to, moveHoverWidget);
@@ -499,7 +501,7 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
         
         // Add hover button widget
         const refactorHoverWidget = Decoration.widget({
-          widget: new FeedbackHoverButtonWidget('refactor', primaryChange.id || 'unknown', view, primaryChange.refactorType),
+          widget: new FeedbackHoverButtonWidget(primaryChange, view),
           side: 1
         });
         builder.add(line.to, line.to, refactorHoverWidget);
@@ -508,12 +510,7 @@ function buildFeedbackDecorations(view: EditorView): { deco: DecorationSet, gutt
       case 'remove':
         // For removals, we create a widget to show the deleted content
         const deletionWidget = Decoration.widget({
-          widget: new FeedbackDeletionWidget(
-            primaryChange.content || '', 
-            primaryChange.element.name,
-            primaryChange.id || 'unknown',
-            view
-          ),
+          widget: new FeedbackDeletionWidget(primaryChange, view),
           side: 1
         });
         builder.add(line.from, line.from, deletionWidget);
@@ -612,29 +609,37 @@ export const feedbackTheme = EditorView.baseTheme({
     position: "relative"
   },
   
-  // Removed line styling (red with strikethrough effect)
+  // Removed line styling (no background, handled by widget)
   ".cm-feedbackRemovedLine": {
-    backgroundColor: "rgba(238, 68, 51, 0.1)",
+    // No styling - widget handles display
   },
   
-  // Deleted content widget
+  // Deleted content widget (compact, inline)
   ".cm-feedbackDeletedChunk": {
-    backgroundColor: "rgba(238, 68, 51, 0.05)",
-    border: "1px solid rgba(238, 68, 51, 0.2)",
-    borderRadius: "4px",
-    position: "relative",
-  },
-  
-  ".cm-feedbackDeletedContent": {
-    fontFamily: "monospace",
-    fontSize: "0.9em",
-    lineHeight: "1.4"
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    paddingLeft: "4px",
+    borderLeft: "3px solid rgba(238, 68, 51, 0.6)",
+    margin: "2px 0",
+    whiteSpace: "pre",
   },
   
   ".cm-feedbackDeletedText": {
     textDecoration: "line-through",
-    color: "#666",
-    opacity: 0.8
+    color: "#888",
+    fontSize: "0.85em",
+    fontFamily: "monospace",
+    opacity: 0.7,
+  },
+  
+  ".cm-feedbackDeletedButton": {
+    opacity: "0",
+    transition: "opacity 0.2s ease",
+  },
+  
+  ".cm-feedbackDeletedChunk:hover .cm-feedbackDeletedButton": {
+    opacity: "1",
   },
   
   // Gutter markers
@@ -744,20 +749,16 @@ export const feedbackTheme = EditorView.baseTheme({
   },
   
   "&dark .cm-feedbackRemovedLine": {
-    backgroundColor: "rgba(238, 68, 51, 0.15)",
+    // No styling - widget handles display
   },
   
   "&dark .cm-feedbackDeletedChunk": {
-    backgroundColor: "rgba(238, 68, 51, 0.08)",
-    border: "1px solid rgba(238, 68, 51, 0.3)"
-  },
-  
-  "&dark .cm-feedbackDeletedHeader": {
-    color: "#ff6655"
+    borderLeft: "3px solid rgba(255, 102, 85, 0.8)",
   },
   
   "&dark .cm-feedbackDeletedText": {
-    color: "#999"
+    color: "#999",
+    opacity: 0.6,
   },
   
   "&dark .cm-feedbackAddedGutter": {

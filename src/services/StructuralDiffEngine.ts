@@ -23,45 +23,78 @@ export class StructuralDiffEngine {
       renamed: []
     };
 
-    // Build hash maps for fast lookup
-    const oldByHash = this.buildHashMap(oldNodes);
-    const newByHash = this.buildHashMap(newNodes);
+    const oldFlat = this.flattenNodes(oldNodes);
+    const newFlat = this.flattenNodes(newNodes);
     const oldByPath = this.buildPathMap(oldNodes);
     const newByPath = this.buildPathMap(newNodes);
 
-    // Detect additions and renames
-    for (const [hash, newNode] of newByHash) {
-      if (oldByHash.has(hash)) {
-        // Same content hash exists - check for rename/relocation
-        const oldNode = oldByHash.get(hash)!;
-        if (oldNode.path !== newNode.path || oldNode.name !== newNode.name) {
-          diff.renamed.push({
-            from: oldNode,
-            to: newNode,
-            confidence: 1.0 // Perfect hash match
-          });
-        } else if (oldNode.contentHash !== newNode.contentHash) {
-          // Same path but content changed
-          diff.modified.push(newNode);
-        }
-      } else {
-        // New hash - check if path exists with different content
-        if (oldByPath.has(newNode.path)) {
-          diff.modified.push(newNode);
-        } else {
-          diff.added.push(newNode);
-        }
+    const matchedOldPaths = new Set<string>();
+    const matchedNewPaths = new Set<string>();
+
+    // Step 1: detect modifications at identical paths
+    for (const [path, newNode] of newByPath) {
+      const oldNode = oldByPath.get(path);
+      if (!oldNode) {
+        continue;
+      }
+
+      matchedOldPaths.add(path);
+      matchedNewPaths.add(path);
+
+      const oldHash = this.getComparableHash(oldNode);
+      const newHash = this.getComparableHash(newNode);
+
+      if (oldHash !== newHash) {
+        diff.modified.push(newNode);
       }
     }
 
-    // Detect removals (nodes in old but not in new)
-    for (const [hash, oldNode] of oldByHash) {
-      if (!newByHash.has(hash) && !this.isRenamed(oldNode, diff.renamed)) {
-        // Check if path still exists (would be modification, already handled)
-        if (!newByPath.has(oldNode.path)) {
-          diff.removed.push(oldNode);
+    // Step 2: prepare unmatched old nodes grouped by hash for rename detection
+    const unmatchedOldNodes = oldFlat.filter(node => !matchedOldPaths.has(node.path));
+    const oldHashBuckets = this.groupByContentHash(unmatchedOldNodes);
+
+    // Step 3: detect additions and renames/moves
+    for (const newNode of newFlat) {
+      if (matchedNewPaths.has(newNode.path)) {
+        continue;
+      }
+
+      const hashKey = this.getComparableHash(newNode);
+      let renamedFrom: SchemaNode | undefined;
+
+      if (hashKey && oldHashBuckets.has(hashKey)) {
+        const bucket = oldHashBuckets.get(hashKey)!;
+        renamedFrom = bucket.shift();
+        if (bucket.length === 0) {
+          oldHashBuckets.delete(hashKey);
         }
       }
+
+      if (renamedFrom) {
+        matchedOldPaths.add(renamedFrom.path);
+        diff.renamed.push({
+          from: renamedFrom,
+          to: newNode,
+          confidence: 1.0
+        });
+      } else if (!oldByPath.has(newNode.path)) {
+        diff.added.push(newNode);
+      }
+
+      matchedNewPaths.add(newNode.path);
+    }
+
+    // Step 4: any remaining unmatched old nodes are removals
+    for (const oldNode of oldFlat) {
+      if (matchedOldPaths.has(oldNode.path)) {
+        continue;
+      }
+
+      if (diff.renamed.some(r => r.from.path === oldNode.path)) {
+        continue;
+      }
+
+      diff.removed.push(oldNode);
     }
 
     // Filter out relocated nodes from additions (they're already in renamed)
@@ -69,29 +102,7 @@ export class StructuralDiffEngine {
       node => !diff.renamed.some(r => r.to.path === node.path)
     );
 
-    // Recursively process children
-    this.processChildren(oldNodes, newNodes, diff);
-
     return diff;
-  }
-
-  /**
-   * Build hash map for quick lookup
-   */
-  private buildHashMap(nodes: SchemaNode[]): Map<string, SchemaNode> {
-    const map = new Map<string, SchemaNode>();
-    
-    const process = (nodes: SchemaNode[]) => {
-      for (const node of nodes) {
-        map.set(node.contentHash, node);
-        if (node.children) {
-          process(node.children);
-        }
-      }
-    };
-
-    process(nodes);
-    return map;
   }
 
   /**
@@ -114,32 +125,62 @@ export class StructuralDiffEngine {
   }
 
   /**
-   * Check if node is in renamed list
+   * Flatten schema nodes for easier processing
    */
-  private isRenamed(node: SchemaNode, renamed: RenamedNode[]): boolean {
-    return renamed.some(r => r.from.path === node.path);
-  }
+  private flattenNodes(nodes: SchemaNode[]): SchemaNode[] {
+    const flat: SchemaNode[] = [];
 
-  /**
-   * Process children recursively
-   */
-  private processChildren(
-    oldNodes: SchemaNode[],
-    newNodes: SchemaNode[],
-    diff: StructuralDiff
-  ): void {
-    for (const oldNode of oldNodes) {
-      if (oldNode.children) {
-        const newNode = newNodes.find(n => n.path === oldNode.path);
-        if (newNode && newNode.children) {
-          const childDiff = this.compare(oldNode.children, newNode.children);
-          diff.added.push(...childDiff.added);
-          diff.removed.push(...childDiff.removed);
-          diff.modified.push(...childDiff.modified);
-          diff.renamed.push(...childDiff.renamed);
+    const traverse = (items: SchemaNode[]) => {
+      for (const node of items) {
+        flat.push(node);
+        if (node.children && node.children.length > 0) {
+          traverse(node.children);
         }
       }
+    };
+
+    traverse(nodes);
+    return flat;
+  }
+
+  private groupByContentHash(nodes: SchemaNode[]): Map<string, SchemaNode[]> {
+    const map = new Map<string, SchemaNode[]>();
+
+    for (const node of nodes) {
+      const hashKey = this.getComparableHash(node);
+      if (!hashKey) {
+        continue;
+      }
+
+      if (!map.has(hashKey)) {
+        map.set(hashKey, []);
+      }
+
+      map.get(hashKey)!.push(node);
     }
+
+    return map;
+  }
+
+  private getComparableHash(node: SchemaNode): string | null {
+    if (node.contentHash && node.contentHash.trim().length > 0) {
+      return node.contentHash;
+    }
+
+    if (!node.children || node.children.length === 0) {
+      return null;
+    }
+
+    const childSignature = node.children
+      .map(child => `${child.type}:${child.name}`)
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+      .join('|');
+
+    if (!childSignature) {
+      return null;
+    }
+
+    return crypto.createHash('sha256').update(childSignature).digest('hex').substring(0, 16);
   }
 
   /**

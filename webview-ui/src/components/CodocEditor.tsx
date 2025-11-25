@@ -91,27 +91,118 @@ export const CodocEditor: React.FC = () => {
       clearTimeout(feedforwardTimeoutRef.current);
     }
 
-    // Cancel any pending feedforward requests
-    vscode.postMessage({ type: 'cancelFeedforward' });
-
-    // Debounce feedforward request
     feedforwardTimeoutRef.current = setTimeout(() => {
-      const view = getEditorView();
-      if (!view) return;
-
-      const cursorPos = view.state.selection.main.head;
-      const cursorLine = view.state.doc.lineAt(cursorPos).number - 1;
-      const cursorColumn = cursorPos - view.state.doc.line(cursorLine + 1).from;
-
       vscode.postMessage({
         type: 'requestFeedforward',
         content,
-        cursorLine,
-        cursorColumn,
+        cursorLine: lastPreviewedLineRef.current,
+        cursorColumn: 0,
         parsedSchema
       });
-    }, 800); // 800ms debounce
+    }, 500);
   }, [parsedSchema]);
+
+  /**
+   * Handle rejection of an addition - remove the added element from CoDoc
+   */
+  const handleRejectAddition = useCallback((change: CodocMergeChange) => {
+    const view = getEditorView();
+    if (!view) return;
+
+    const doc = view.state.doc;
+    const totalLines = doc.lines;
+
+    let targetLineIndex = -1;
+    if (change.lineNumber && change.lineNumber > 0 && change.lineNumber <= totalLines) {
+      targetLineIndex = change.lineNumber - 1;
+    }
+
+    const elementLabel = change.element?.name || change.element?.path || change.id;
+
+    if (targetLineIndex === -1) {
+      // Fallback search by element label
+      const lines = doc.toString().split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) continue;
+        if (
+          trimmed === `$${elementLabel}()` ||
+          trimmed === `%${elementLabel}` ||
+          trimmed === `/${elementLabel}` ||
+          trimmed.endsWith(elementLabel) ||
+          trimmed === `@${elementLabel}`
+        ) {
+          targetLineIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (targetLineIndex === -1) {
+      console.warn('Could not find element to remove:', elementLabel);
+      return;
+    }
+
+    const targetLine = doc.line(targetLineIndex + 1);
+    const currentIndent = targetLine.text.length - targetLine.text.trimStart().length;
+    let lastLineToRemove = targetLineIndex;
+
+    for (let i = targetLineIndex + 1; i < totalLines; i++) {
+      const lineInfo = doc.line(i + 1);
+      const trimmed = lineInfo.text.trim();
+      if (!trimmed) continue;
+      const indent = lineInfo.text.length - lineInfo.text.trimStart().length;
+      if (indent <= currentIndent) break;
+      lastLineToRemove = i;
+    }
+
+    let deleteFrom = targetLine.from;
+    let deleteTo = doc.line(lastLineToRemove + 1).to;
+
+    // Include trailing newline if present
+    if (deleteTo < doc.length && doc.sliceString(deleteTo, deleteTo + 1) === '\n') {
+      deleteTo += 1;
+    }
+
+    view.dispatch({
+      changes: { from: deleteFrom, to: deleteTo, insert: '' }
+    });
+
+    console.log(`Rejected addition: removed ${elementLabel} from CoDoc`);
+  }, []);
+
+  /**
+   * Handle rejection of a removal - restore the removed element to CoDoc
+   */
+  const handleRejectRemoval = useCallback((change: CodocMergeChange) => {
+    const view = getEditorView();
+    if (!view) return;
+
+    const doc = view.state.doc;
+    const contentToRestore = change.content || '';
+    if (!contentToRestore.trim()) {
+      console.warn('No content to restore for removal change', change.id);
+      return;
+    }
+
+    const normalizedContent = contentToRestore.endsWith('\n') ? contentToRestore : `${contentToRestore}\n`;
+
+    let insertPos: number;
+    if (change.lineNumber && change.lineNumber > 0 && change.lineNumber <= doc.lines) {
+      insertPos = doc.line(change.lineNumber).from;
+    } else {
+      insertPos = doc.length;
+    }
+
+    const needsLeadingNewline = insertPos > 0 && doc.sliceString(insertPos - 1, insertPos) !== '\n';
+    const textToInsert = `${needsLeadingNewline ? '\n' : ''}${normalizedContent}`;
+
+    view.dispatch({
+      changes: { from: insertPos, insert: textToInsert }
+    });
+
+    console.log(`Rejected removal: restored change ${change.id}`);
+  }, []);
 
   // Handle messages from extension - connects backend services to frontend extensions
   useEffect(() => {
@@ -126,6 +217,14 @@ export const CodocEditor: React.FC = () => {
             savedCursorPosRef.current = view.state.selection.main.head;
           }
           setContent(message.content);
+          
+          // If backend provided a new cursor line (after reordering), use it
+          if (message.newCursorLine !== undefined && view) {
+            // Convert 1-indexed line number to 0-indexed position
+            const lineNumber = message.newCursorLine - 1;
+            const line = view.state.doc.line(Math.max(1, Math.min(lineNumber + 1, view.state.doc.lines)));
+            savedCursorPosRef.current = line.from;
+          }
           break;
 
         case 'codebaseScanned':
@@ -204,9 +303,33 @@ export const CodocEditor: React.FC = () => {
       }
     };
 
+    // Handle custom events from feedback decorations
+    const feedbackRejectionHandler = (event: Event) => {
+      const customEvent = event as CustomEvent<{ change?: CodocMergeChange }>;
+      const change = customEvent.detail?.change;
+      if (!change) {
+        return;
+      }
+
+      if (change.type === 'add') {
+        handleRejectAddition(change);
+      } else if (change.type === 'remove') {
+        handleRejectRemoval(change);
+      } else {
+        vscode.postMessage({
+          type: 'rejectFeedbackChange',
+          changeId: change.id,
+          changeType: change.type,
+          content: change.content
+        });
+      }
+    };
+
     window.addEventListener('message', messageHandler);
+    window.addEventListener('feedbackChangeRejected', feedbackRejectionHandler);
     return () => {
       window.removeEventListener('message', messageHandler);
+      window.removeEventListener('feedbackChangeRejected', feedbackRejectionHandler);
       // Clean up feedforward timeout on unmount
       if (feedforwardTimeoutRef.current) {
         clearTimeout(feedforwardTimeoutRef.current);
