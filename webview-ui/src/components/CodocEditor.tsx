@@ -47,7 +47,7 @@ import { schemaFoldingExtension } from '../lib/editor/schemaFoldingExtension';
 import { fileStructureExtension } from '../lib/editor/fileStructureExtension';
 import { feedbackDecorationExtension, showFeedbackDecorationsInView, clearFeedbackDecorationsInView, CodocMergeChange } from '../lib/editor/feedbackDecorationExtension';
 import { feedforwardExtension, applyFeedforwardSuggestions, clearFeedforwardSuggestions, type FeedforwardSuggestion } from '../lib/editor/feedforwardService';
-import { dependencyHighlightExtension, setDependencyGraphInView, DependencyGraph as DependencyGraphType } from '../lib/editor/dependencyHighlightExtension';
+import { dependencyHighlightExtension, setDependencyGraphInView, highlightAffectedNodesInView, DependencyGraph as DependencyGraphType } from '../lib/editor/dependencyHighlightExtension';
 import { SchemaNode } from '../types';
 
 // VSCode API
@@ -75,6 +75,7 @@ export const CodocEditor: React.FC = () => {
   const [dependencyGraph, setDependencyGraph] = useState<DependencyGraphType | null>(null);
   const editorRef = useRef<ReactCodeMirrorRef>(null);
   const feedforwardTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const savedCursorPosRef = useRef<number | null>(null);
 
   // Get EditorView instance from the ref
   const getEditorView = (): EditorView | null => {
@@ -116,6 +117,11 @@ export const CodocEditor: React.FC = () => {
       const message = event.data;
       const view = getEditorView();
 
+      // Save cursor position before content updates
+      if (message.type === 'contentUpdate' && view) {
+        savedCursorPosRef.current = view.state.selection.main.head;
+      }
+
       switch (message.type) {
         case 'contentUpdate':
           setContent(message.content);
@@ -124,7 +130,6 @@ export const CodocEditor: React.FC = () => {
         case 'codebaseScanned':
           setParsedSchema(message.parsedSchema || []);
           setCodebase(message.snapshot?.files || []);
-          // Set dependency graph for highlighting
           if (message.snapshot?.dependencyGraph) {
             setDependencyGraph(message.snapshot.dependencyGraph);
             const view = getEditorView();
@@ -163,6 +168,13 @@ export const CodocEditor: React.FC = () => {
         case 'clearFeedback':
           if (view) {
             clearFeedbackDecorationsInView(view);
+          }
+          break;
+
+        case 'highlightAffectedNodes':
+          // Highlight affected nodes temporarily
+          if (view && message.nodeIds) {
+            highlightAffectedNodesInView(view, message.nodeIds, message.duration || 1500);
           }
           break;
 
@@ -212,6 +224,11 @@ export const CodocEditor: React.FC = () => {
   }, [dependencyGraph]);
 
   const handleSyncCodebase = useCallback(() => {
+    // Save cursor position before sync
+    const view = getEditorView();
+    if (view) {
+      savedCursorPosRef.current = view.state.selection.main.head;
+    }
     vscode.postMessage({ type: 'syncCodebase' });
   }, []);
 
@@ -243,6 +260,20 @@ export const CodocEditor: React.FC = () => {
 
   const handleContentChange = useCallback((value: string) => {
     setContent(value);
+    
+    // Restore cursor position if we have a saved one (from sync/preview operations)
+    if (savedCursorPosRef.current !== null) {
+      const view = getEditorView();
+      if (view) {
+        const pos = Math.min(savedCursorPosRef.current, value.length);
+        view.dispatch({
+          selection: { anchor: pos, head: pos },
+          scrollIntoView: true
+        });
+        savedCursorPosRef.current = null;
+      }
+    }
+    
     vscode.postMessage({
       type: 'contentChanged',
       content: value
@@ -252,6 +283,15 @@ export const CodocEditor: React.FC = () => {
     // requestFeedforward(value);
   }, [requestFeedforward]);
 
+  // Handle cursor position changes for preview
+  const handleCursorChange = useCallback((cursorLine: number) => {
+    vscode.postMessage({
+      type: 'cursorPositionChanged',
+      lineNumber: cursorLine + 1, // Convert to 1-based
+      parsedSchema
+    });
+  }, [parsedSchema]);
+
   // Combine all extensions
   const extensions = React.useMemo(() => [
     fileStructureExtension(),           // Visual structure icons
@@ -260,7 +300,15 @@ export const CodocEditor: React.FC = () => {
     ...feedbackDecorationExtension(),   // Feedback from StructuralDiffEngine
     ...feedforwardExtension(),          // Suggestions from ImpactAnalysisService
     ...dependencyHighlightExtension(),  // Dependency-based opacity highlighting
-  ], []);
+    EditorView.updateListener.of((update) => {
+      // Track cursor position changes
+      if (update.selectionSet) {
+        const cursorPos = update.state.selection.main.head;
+        const cursorLine = update.state.doc.lineAt(cursorPos).number - 1;
+        handleCursorChange(cursorLine);
+      }
+    })
+  ], [handleCursorChange]);
 
   return (
     <div style={{ 

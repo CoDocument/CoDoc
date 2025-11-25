@@ -264,7 +264,7 @@ function setupAutoSync(): void {
 
   const syncCoDoc = async () => {
     if (editorProvider.currentDocument) {
-      await editorProvider.syncWithCodebase();
+      await editorProvider.syncCodebase();
     }
   };
 

@@ -45,6 +45,12 @@ export interface DependencyEdge {
 // State effect to set the dependency graph
 export const setDependencyGraph = StateEffect.define<DependencyGraph>();
 
+// State effect to highlight affected nodes temporarily
+export const highlightAffectedNodes = StateEffect.define<{
+    nodeIds: string[];
+    duration: number;
+}>();
+
 // State field to store the dependency graph
 const dependencyGraphField = StateField.define<DependencyGraph>({
     create() {
@@ -57,6 +63,26 @@ const dependencyGraphField = StateField.define<DependencyGraph>({
             }
         }
         return graph;
+    }
+});
+
+// State field to track temporarily highlighted nodes
+const affectedNodesField = StateField.define<Set<string>>({
+    create() {
+        return new Set();
+    },
+    update(affected, tr) {
+        for (const effect of tr.effects) {
+            if (effect.is(highlightAffectedNodes)) {
+                const newSet = new Set(effect.value.nodeIds);
+                // Auto-clear after duration
+                setTimeout(() => {
+                    // This will be handled by the view plugin
+                }, effect.value.duration);
+                return newSet;
+            }
+        }
+        return affected;
     }
 });
 
@@ -223,6 +249,7 @@ function getRelatedNodeIds(
 function buildDependencyDecorations(view: EditorView): DecorationSet {
     const doc = view.state.doc;
     const graph = view.state.field(dependencyGraphField);
+    const affectedNodes = view.state.field(affectedNodesField);
     const cursorPos = view.state.selection.main.head;
     const cursorLine = doc.lineAt(cursorPos).number;
 
@@ -267,6 +294,7 @@ function buildDependencyDecorations(view: EditorView): DecorationSet {
 
         // Check if this element is related
         let isRelated = false;
+        let isAffected = false;
 
         // Build potential node IDs for this element using full path from graph
         const lineFilePath = findFilePathForCursor(doc, lineNum, graph);
@@ -284,10 +312,25 @@ function buildDependencyDecorations(view: EditorView): DecorationSet {
                 relatedCount++;
                 break;
             }
+            // Check if this node is in the affected nodes set
+            if (nodeId && affectedNodes.has(nodeId)) {
+                isAffected = true;
+            }
         }
 
-        // Apply opacity decoration for non-related elements
-        if (!isRelated && lineNum !== cursorLine) {
+        // Apply decorations
+        if (isAffected) {
+            // Highlight affected nodes with orange background
+            builder.add(
+                line.from,
+                line.from,
+                Decoration.line({
+                    class: "cm-affectedLine",
+                    attributes: { "data-affected": "true" }
+                })
+            );
+        } else if (!isRelated && lineNum !== cursorLine) {
+            // Apply opacity decoration for non-related elements
             builder.add(
                 line.from,
                 line.from,
@@ -315,9 +358,11 @@ const dependencyHighlightPlugin = ViewPlugin.fromClass(
         }
 
         update(update: ViewUpdate) {
-            // Rebuild decorations when cursor moves or graph changes
+            // Rebuild decorations when cursor moves, graph changes, or affected nodes change
             if (update.selectionSet ||
-                update.transactions.some(tr => tr.effects.some(e => e.is(setDependencyGraph)))) {
+                update.transactions.some(tr => tr.effects.some(e => 
+                    e.is(setDependencyGraph) || e.is(highlightAffectedNodes)
+                ))) {
                 this.decorations = buildDependencyDecorations(update.view);
             }
         }
@@ -334,6 +379,19 @@ const dependencyHighlightTheme = EditorView.baseTheme({
     ".cm-dimmedLine": {
         opacity: "0.6",
         transition: "opacity 0.2s ease"
+    },
+    ".cm-affectedLine": {
+        backgroundColor: "rgba(255, 165, 0, 0.25)",
+        transition: "background-color 0.3s ease",
+        animation: "fadeOut 1.5s ease-in-out forwards"
+    },
+    "@keyframes fadeOut": {
+        "0%": {
+            backgroundColor: "rgba(255, 165, 0, 0.35)"
+        },
+        "100%": {
+            backgroundColor: "rgba(255, 165, 0, 0)"
+        }
     }
 });
 
@@ -343,6 +401,7 @@ const dependencyHighlightTheme = EditorView.baseTheme({
 export function dependencyHighlightExtension() {
     return [
         dependencyGraphField,
+        affectedNodesField,
         dependencyHighlightPlugin,
         dependencyHighlightTheme
     ];
@@ -356,3 +415,16 @@ export function setDependencyGraphInView(view: EditorView, graph: DependencyGrap
         effects: setDependencyGraph.of(graph)
     });
 }
+
+/**
+ * Helper to highlight affected nodes temporarily
+ */
+export function highlightAffectedNodesInView(view: EditorView, nodeIds: string[], duration: number = 1500) {
+    view.dispatch({ effects: highlightAffectedNodes.of({ nodeIds, duration }) });
+    
+    // Clear after duration
+    setTimeout(() => {
+        view.dispatch({ effects: highlightAffectedNodes.of({ nodeIds: [], duration: 0 }) });
+    }, duration);
+}
+

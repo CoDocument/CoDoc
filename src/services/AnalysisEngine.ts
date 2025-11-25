@@ -80,8 +80,8 @@ export class AnalysisEngine {
     // Build dependency graph
     snapshot.dependencyGraph = this.buildDependencyGraph(snapshot.files);
 
-    // Extract directories
-    snapshot.directories = this.extractDirectories(snapshot.files);
+    // Extract directories (including empty ones)
+    snapshot.directories = await this.extractAllDirectories(snapshot.files);
 
     return snapshot;
   }
@@ -521,21 +521,89 @@ export class AnalysisEngine {
   }
 
   /**
-   * Extract directory list from files
+   * Extract directory list from files and scan for empty directories
    */
-  private extractDirectories(files: FileStructure[]): string[] {
+  private async extractAllDirectories(files: FileStructure[]): Promise<string[]> {
     const dirs = new Set<string>();
+    
+    // Add directories derived from file paths
     for (const file of files) {
       const parts = file.path.split('/');
       for (let i = 1; i < parts.length; i++) {
         dirs.add(parts.slice(0, i).join('/'));
       }
     }
+    
+    // Scan filesystem for all directories including empty ones
+    try {
+      const dirPattern = 'src/**';
+      const excludePatterns = [
+        '**/node_modules/**',
+        '**/dist/**',
+        '**/build/**',
+        '**/out/**'
+      ];
+      
+      const allItems = await vscode.workspace.findFiles(
+        dirPattern,
+        `{${excludePatterns.join(',')}}`
+      );
+      
+      // Extract directory paths from all found items
+      for (const item of allItems) {
+        const relativePath = path.relative(this.workspaceRoot, item.fsPath);
+        const dirPath = path.dirname(relativePath);
+        
+        if (dirPath && dirPath !== '.' && dirPath.startsWith('src')) {
+          const parts = dirPath.split('/');
+          for (let i = 1; i <= parts.length; i++) {
+            dirs.add(parts.slice(0, i).join('/'));
+          }
+        }
+      }
+      
+      // Also scan for directories directly using readDirectory
+      await this.scanDirectoriesRecursive('src', dirs);
+    } catch (error) {
+      console.warn('Failed to scan directories:', error);
+    }
+    
     return Array.from(dirs).sort();
+  }
+  
+  /**
+   * Recursively scan directories to find all folders including empty ones
+   */
+  private async scanDirectoriesRecursive(dirPath: string, dirs: Set<string>): Promise<void> {
+    try {
+      const fullPath = path.join(this.workspaceRoot, dirPath);
+      const dirUri = vscode.Uri.file(fullPath);
+      
+      const entries = await vscode.workspace.fs.readDirectory(dirUri);
+      
+      for (const [name, type] of entries) {
+        // Skip excluded directories
+        if (name === 'node_modules' || name === 'dist' || name === 'build' || name === 'out') {
+          continue;
+        }
+        
+        if (type === vscode.FileType.Directory) {
+          const subDirPath = path.join(dirPath, name).replace(/\\/g, '/');
+          dirs.add(subDirPath);
+          
+          // Recursively scan subdirectories
+          await this.scanDirectoriesRecursive(subDirPath, dirs);
+        }
+      }
+    } catch (error) {
+      // Directory might not exist or not accessible
+      console.debug(`Could not scan directory ${dirPath}:`, error);
+    }
   }
 
   /**
    * Build CODOC structure from snapshot
+   * Now also assigns correct line numbers based on tree traversal order
    */
   constructCodoc(snapshot: CodebaseSnapshot): SchemaNode[] {
     const root: SchemaNode = {
@@ -551,12 +619,74 @@ export class AnalysisEngine {
       children: []
     };
 
-    // Build hierarchical structure
+    // Build hierarchical structure from files
     for (const file of snapshot.files) {
       this.addFileToTree(root, file, snapshot.dependencyGraph);
     }
+    
+    // Add empty directories that don't have any files
+    for (const dir of snapshot.directories) {
+      this.ensureDirectoryExists(root, dir);
+    }
+
+    // Assign line numbers based on serialization order
+    this.assignLineNumbers(root.children || [], 1);
 
     return root.children || [];
+  }
+
+  /**
+   * Ensure a directory path exists in the tree, creating it if necessary
+   */
+  private ensureDirectoryExists(root: SchemaNode, dirPath: string): void {
+    const pathParts = dirPath.split('/').filter(p => p.length > 0);
+    let current = root;
+    
+    for (let i = 0; i < pathParts.length; i++) {
+      const dirName = pathParts[i];
+      let dirNode = current.children?.find(c => c.name === dirName && c.type === 'directory');
+      
+      if (!dirNode) {
+        // Create the directory node
+        dirNode = {
+          id: `dir_${pathParts.slice(0, i + 1).join('_')}`,
+          type: 'directory',
+          name: dirName,
+          path: pathParts.slice(0, i + 1).join('/'),
+          lineNumber: 0,
+          column: (i + 1) * 2,
+          dependencies: [],
+          dependents: [],
+          contentHash: '',
+          children: []
+        };
+        
+        if (!current.children) {
+          current.children = [];
+        }
+        current.children.push(dirNode);
+      }
+      
+      current = dirNode;
+    }
+  }
+  
+  /**
+   * Recursively assign line numbers to nodes based on their position in serialized CoDoc
+   * This ensures parser line numbers match the actual CoDoc text structure
+   */
+  private assignLineNumbers(nodes: SchemaNode[], startLine: number): number {
+    let currentLine = startLine;
+    
+    for (const node of nodes) {
+      node.lineNumber = currentLine++;
+      
+      if (node.children && node.children.length > 0) {
+        currentLine = this.assignLineNumbers(node.children, currentLine);
+      }
+    }
+    
+    return currentLine;
   }
 
   /**

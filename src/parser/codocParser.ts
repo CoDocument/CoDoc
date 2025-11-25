@@ -115,10 +115,10 @@ export class CodocParser {
     if (cst.children.directoryDecl) {
       const name = cst.children.directoryDecl[0].children.Identifier[0].image;
       return {
-        id,
+        id: `dir_${name}`, // Temporary ID, will be updated when attached
         type: 'directory',
         name,
-        path: `/${name}`,
+        path: name, // Will be updated when attached to tree
         lineNumber,
         column: indentLevel * this.indentUnit,
         dependencies: [],
@@ -130,11 +130,12 @@ export class CodocParser {
     if (cst.children.fileDecl) {
       const name = cst.children.fileDecl[0].children.Identifier[0].image;
       const ext = cst.children.fileDecl[0].children.FileExtension[0].image;
+      const fileName = name + ext;
       return {
-        id,
+        id: `file_${name}`, // Temporary ID, will be updated when attached
         type: 'file',
-        name: name + ext,
-        path: name + ext,
+        name: fileName,
+        path: fileName, // Will be updated when attached to tree
         extension: ext,
         lineNumber,
         column: indentLevel * this.indentUnit,
@@ -148,10 +149,10 @@ export class CodocParser {
       const fullToken = cst.children.componentDecl[0].children.Component[0].image;
       const name = fullToken.substring(1); // Remove %
       return {
-        id,
+        id: `component_${name}`, // Temporary ID, will be updated when attached
         type: 'component',
         name,
-        path: `%${name}`,
+        path: `%${name}`, // Will be updated when attached to tree
         lineNumber,
         column: indentLevel * this.indentUnit,
         dependencies: [],
@@ -164,10 +165,10 @@ export class CodocParser {
       const fullToken = cst.children.functionDecl[0].children.FunctionToken[0].image;
       const name = fullToken.substring(1, fullToken.length - 2); // Remove $ and ()
       return {
-        id,
+        id: `function_${name}`, // Temporary ID, will be updated when attached
         type: 'function',
         name,
-        path: `$${name}()`,
+        path: `$${name}()`, // Will be updated when attached to tree
         functionSignature: fullToken,
         lineNumber,
         column: indentLevel * this.indentUnit,
@@ -219,6 +220,7 @@ export class CodocParser {
 
   /**
    * Attach node to tree using stack-based approach
+   * Now also updates path and ID to reflect full hierarchy
    */
   private attachNodeToTree(
     node: SchemaNode,
@@ -244,6 +246,9 @@ export class CodocParser {
           potentialParent.children = [];
         }
         potentialParent.children.push(node);
+        
+        // Update path based on parent
+        this.updateNodePathAndId(node, potentialParent);
       } else {
         // Invalid relationship - find correct parent or make top-level
         const validParent = this.findValidParent(node.type, context.stack);
@@ -253,6 +258,10 @@ export class CodocParser {
             validParent.node.children = [];
           }
           validParent.node.children.push(node);
+          
+          // Update path based on valid parent
+          this.updateNodePathAndId(node, validParent.node);
+          
           context.validationMessages.push(
             `Line ${node.lineNumber}: Auto-corrected parent (${node.type} cannot be child of ${potentialParent.type})`
           );
@@ -268,6 +277,46 @@ export class CodocParser {
     // Add to stack and all nodes
     context.stack.push({ node, indent: indentLevel });
     context.allNodes.push(node);
+  }
+
+  /**
+   * Update node's path and ID based on parent hierarchy
+   */
+  private updateNodePathAndId(node: SchemaNode, parent: SchemaNode): void {
+    if (node.type === 'directory') {
+      // Build path from root to this directory
+      node.path = this.buildFullPath(parent) + '/' + node.name;
+      node.id = `dir_${node.path.replace(/\//g, '_')}`;
+    } else if (node.type === 'file') {
+      // File path is parent directory path + file name
+      const parentPath = this.buildFullPath(parent);
+      node.path = parentPath + '/' + node.name;
+      node.id = `file_${node.path.replace(/[\/\.]/g, '_')}`;
+    } else if (node.type === 'function' || node.type === 'component') {
+      // Elements need their file's full path
+      const filePath = this.buildFullPath(parent);
+      node.path = `${filePath}#${node.name}`;
+      node.id = `${filePath}:${node.name}`;
+    }
+  }
+
+  /**
+   * Build full path from root to given node
+   */
+  private buildFullPath(node: SchemaNode): string {
+    const parts: string[] = [];
+    let current: SchemaNode | undefined = node;
+    
+    while (current && current.name) { // Root nodes have empty name
+      if (current.type === 'directory') {
+        parts.unshift(current.name);
+      } else if (current.type === 'file') {
+        parts.unshift(current.name);
+      }
+      current = current.parent;
+    }
+    
+    return parts.join('/');
   }
 
   /**
