@@ -1,0 +1,98 @@
+
+USER'S INITIAL SPEC:
+/src
+  /components
+    Register.tsx
+      %Register
+    Login.tsx
+  hashPSWD.ts
+    $hashPassword()
+  App.tsx
+    %App
+    $renderCurrentView()
+  index.tsx
+
+
+First Generate the Register.tsx:
+/src
+  /components
+    Register.tsx
+      $checkEmailExists()
+      $handleSubmit()
+  App.tsx
+    %App
+    $renderCurrentView()
+  index.tsx
+
+
+
+then Generate the Login.tsx:
+/src
+  /components
+    Register.tsx
+      $checkEmailExists()
+      $handleSubmit()
+    Login.tsx
+      $checkLockout()
+      $authenticateUser()
+      $handleSubmit()
+  App.tsx
+    %App
+    $renderCurrentView()
+  index.tsx
+
+
+then Generate the hashPSWD.ts:
+/src
+  /components
+    Register.tsx
+      $checkEmailExists()
+      $handleSubmit()
+    Login.tsx
+      $checkLockout()
+      $authenticateUser()
+      $handleSubmit()
+  hashPSWD.ts
+    $generateSalt()
+    $stringToArrayBuffer()
+    $arrayBufferToHex()
+    $deriveKey()
+    $hashPassword()
+    $verifyPassword()
+    $createPasswordHash()
+    $isCryptoSupported()
+    $validatePasswordStrength()
+  App.tsx
+    %App
+    $renderCurrentView()
+  index.tsx
+
+
+
+
+Final merged view (+ for added, * for modified, - for deleted):
+/src
+  /components
+    Register.tsx
+      - %Register
+      + $checkEmailExists()
+      + $handleSubmit()
+    Login.tsx
+      + $checkLockout()
+      + $authenticateUser()
+      + $handleSubmit()
+  + /utils
+    hashPSWD.ts
+      + $generateSalt()
+      + $stringToArrayBuffer()
+      + $arrayBufferToHex()
+      + $deriveKey()
+      * $hashPassword()
+      + $verifyPassword()
+      + $createPasswordHash()
+      + $isCryptoSupported()
+      + $validatePasswordStrength()
+  App.tsx
+    * %App
+    $renderCurrentView()
+  index.tsx

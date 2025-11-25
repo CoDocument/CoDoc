@@ -33,6 +33,9 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   // Debounce timer for CoDoc changes
   private syncDebounceTimer: NodeJS.Timeout | null = null;
   private readonly SYNC_DEBOUNCE_MS = 1500;
+  
+  // Flag to prevent feedback loop when making programmatic updates
+  private isUpdatingProgrammatically = false;
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -56,10 +59,13 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
     webviewPanel.webview.html = this.getWebviewContent(webviewPanel.webview);
 
-    // Handle document changes
+    // Handle document changes (only from external sources)
     const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
       if (e.document.uri.toString() === document.uri.toString()) {
-        this.sendContentToWebview(e.document.getText());
+        // Only send updates if not from our own programmatic changes
+        if (!this.isUpdatingProgrammatically) {
+          this.sendContentToWebview(e.document.getText());
+        }
       }
     });
 
@@ -231,20 +237,26 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   private async updateDocument(content: string): Promise<void> {
     if (!this.currentDocument) return;
 
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(
-      this.currentDocument.uri,
-      new vscode.Range(0, 0, this.currentDocument.lineCount, 0),
-      content
-    );
-    await vscode.workspace.applyEdit(edit);
+    this.isUpdatingProgrammatically = true;
+    try {
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(
+        this.currentDocument.uri,
+        new vscode.Range(0, 0, this.currentDocument.lineCount, 0),
+        content
+      );
+      await vscode.workspace.applyEdit(edit);
+    } finally {
+      this.isUpdatingProgrammatically = false;
+    }
   }
 
-  private sendContentToWebview(content: string): void {
+  private sendContentToWebview(content: string, preserveCursor: boolean = false): void {
     if (this.currentPanel) {
       this.currentPanel.webview.postMessage({
         type: 'contentUpdate',
-        content
+        content,
+        preserveCursor
       });
     }
   }
@@ -271,13 +283,18 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
         // Update document content
         if (this.currentDocument) {
-          const edit = new vscode.WorkspaceEdit();
-          const fullRange = new vscode.Range(
-            this.currentDocument.positionAt(0),
-            this.currentDocument.positionAt(this.currentDocument.getText().length)
-          );
-          edit.replace(this.currentDocument.uri, fullRange, codocContent);
-          await vscode.workspace.applyEdit(edit);
+          this.isUpdatingProgrammatically = true;
+          try {
+            const edit = new vscode.WorkspaceEdit();
+            const fullRange = new vscode.Range(
+              this.currentDocument.positionAt(0),
+              this.currentDocument.positionAt(this.currentDocument.getText().length)
+            );
+            edit.replace(this.currentDocument.uri, fullRange, codocContent);
+            await vscode.workspace.applyEdit(edit);
+          } finally {
+            this.isUpdatingProgrammatically = false;
+          }
         }
 
         // Update editor state
@@ -299,7 +316,8 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
           this.currentPanel.webview.postMessage({
             type: 'contentUpdate',
-            content: codocContent
+            content: codocContent,
+            preserveCursor: true
           });
         }
 
@@ -364,15 +382,12 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         // STEP 3: Compare pre-generation CoDoc with post-generation CoDoc
         const postGenerationSnapshot = await this.analysisEngine!.scanCodebase();
         const postGenerationCoDoc = this.analysisEngine!.constructCodoc(postGenerationSnapshot);
-        console.log('Post generation CoDoc:', postGenerationCoDoc);
 
         // Use StructuralDiffEngine to identify ALL changes
         const diff = structuralDiffEngine.compare(this.preGenerationCoDoc, postGenerationCoDoc);
-        console.log('Mock generation structural diff:', diff);
 
         // Convert structural diff to AIChange[] with comprehensive classification
         const aiChanges = structuralDiffEngine.convertToAIChanges(diff);
-        console.log('Mock generation AI changes:', aiChanges);
 
         progress.report({ message: 'Displaying AI feedback...' });
 
@@ -763,31 +778,31 @@ ${prompt}`;
       }
 
       // Show revert notification if there are significant changes
-      if (syncResult.operations.length > 0 && syncResult.revertToken) {
-        const hasDestructiveOps = syncResult.operations.some(op =>
-          op.type === 'delete'
-        );
+      // if (syncResult.operations.length > 0 && syncResult.revertToken) {
+      //   const hasDestructiveOps = syncResult.operations.some(op =>
+      //     op.type === 'delete'
+      //   );
 
-        if (hasDestructiveOps) {
-          await this.fileSystemSyncService.showRevertNotification(
-            syncResult.operations,
-            syncResult.revertToken
-          );
-        }
+      //   if (hasDestructiveOps) {
+      //     await this.fileSystemSyncService.showRevertNotification(
+      //       syncResult.operations,
+      //       syncResult.revertToken
+      //     );
+      //   }
 
-        // Highlight affected nodes in the editor
-        const affectedNodeIds = syncResult.operations
-          .flatMap(op => op.affectedNodes || [])
-          .filter((id, index, self) => self.indexOf(id) === index);
+      //   // Highlight affected nodes in the editor
+      //   const affectedNodeIds = syncResult.operations
+      //     .flatMap(op => op.affectedNodes || [])
+      //     .filter((id, index, self) => self.indexOf(id) === index);
 
-        if (affectedNodeIds.length > 0) {
-          this.currentPanel.webview.postMessage({
-            type: 'highlightAffectedNodes',
-            nodeIds: affectedNodeIds,
-            duration: 1500
-          });
-        }
-      }
+      //   if (affectedNodeIds.length > 0) {
+      //     this.currentPanel.webview.postMessage({
+      //       type: 'highlightAffectedNodes',
+      //       nodeIds: affectedNodeIds,
+      //       duration: 1500
+      //     });
+      //   }
+      // }
 
       // Update previous schema
       this.previousSchema = newSchema;

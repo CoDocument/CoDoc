@@ -268,16 +268,12 @@ Return ONLY the JSON array, no additional text.`;
       rejectedPatterns
     );
 
-    console.log('Feedforward prompt:', { userPrompt });
-
     // Call OpenAI
     const response = await this.callOpenAIForFeedforward(
       systemPrompt,
       userPrompt,
       apiKey
     );
-
-    console.log('Feedforward response:', response);
 
     // Parse and structure suggestions
     const suggestions = this.parseFeedforwardResponse(
@@ -287,7 +283,6 @@ Return ONLY the JSON array, no additional text.`;
       content,
       parsedSchema
     );
-    console.log('Parsed feedforward suggestions:', suggestions);
 
     return suggestions;
   }
@@ -543,7 +538,6 @@ DO NOT INCLUDE ANYTHING ELSE IN YOUR RESPONSE, NO EXPLANATION, NO COMMENTS, NO T
 
     // Extract existing structure from content for duplicate detection
     const existingElements = this.extractExistingElements(content);
-    console.log('[BACKEND] Existing elements:', existingElements);
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -570,7 +564,6 @@ DO NOT INCLUDE ANYTHING ELSE IN YOUR RESPONSE, NO EXPLANATION, NO COMMENTS, NO T
           
           // Verify if this path exists
           const pathExists = existingElements.has(firstPart);
-          console.log(`[BACKEND] Context path "${firstPart}" exists: ${pathExists}`);
         }
       }
 
@@ -586,7 +579,6 @@ DO NOT INCLUDE ANYTHING ELSE IN YOUR RESPONSE, NO EXPLANATION, NO COMMENTS, NO T
 
           // Check if this element already exists
           if (this.elementExists(itemTrimmed, existingElements, contextPath)) {
-            console.log(`[BACKEND] Skipping existing element: ${itemTrimmed} in ${contextPath}`);
             continue;
           }
 
@@ -611,7 +603,6 @@ DO NOT INCLUDE ANYTHING ELSE IN YOUR RESPONSE, NO EXPLANATION, NO COMMENTS, NO T
       }
     }
 
-    console.log('[BACKEND] Parsed feedforward suggestions (filtered):', suggestions);
     return suggestions;
   }
 

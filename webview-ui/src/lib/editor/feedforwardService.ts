@@ -68,8 +68,6 @@ const feedforwardState = StateField.define<{
 
     for (const effect of tr.effects) {
       if (effect.is(addFeedforwardEffect)) {
-        // Clear old suggestions and replace with new ones
-        console.log('[FRONTEND] Adding new feedforward suggestions:', effect.value.suggestions);
         newValue.suggestions = effect.value.suggestions;
         newValue.acceptedSuggestions = new Set();
         newValue.highlightedSuggestion = null;
@@ -274,7 +272,6 @@ const feedforwardPlugin = ViewPlugin.fromClass(
           const state = view.state.field(feedforwardState);
           
           if (state.acceptedSuggestions.size > 0) {
-            console.log('Alt key released - inserting all accepted suggestions');
             this.insertAllAcceptedSuggestions(view, state);
           } else {
             // Disable navigation mode when Alt is released
@@ -356,8 +353,6 @@ const feedforwardPlugin = ViewPlugin.fromClass(
       } else {
         view.dispatch({ effects: [clearFeedforwardEffect.of()] });
       }
-
-      console.log('All accepted suggestions inserted successfully');
     }
 
     updateHighlight(view: EditorView) {
@@ -412,8 +407,6 @@ const feedforwardPlugin = ViewPlugin.fromClass(
         return;
       }
 
-      console.log('[FEEDFORWARD] Building decorations for', state.suggestions.length, 'suggestions');
-
       const decorationData: Array<{decoration: any, position: number}> = [];
 
       for (const suggestion of state.suggestions) {
@@ -447,8 +440,6 @@ const feedforwardPlugin = ViewPlugin.fromClass(
 
       decorationData.sort((a, b) => a.position - b.position);
       this.decorations = Decoration.set(decorationData.map(d => d.decoration));
-      
-      console.log('[FEEDFORWARD] Built', decorationData.length, 'decorations');
     }
 
     destroy() {

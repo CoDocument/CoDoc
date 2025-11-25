@@ -49,18 +49,10 @@ export class OpenCodeService {
    */
   async initializeTerminal(workDir: string): Promise<void> {
     const terminal = await this.getOrCreateTerminal(workDir);
-    console.log('Initializing OpenCode terminal...', terminal);
-
-    // Start opencode in the terminal
     terminal.sendText('opencode', true);
-    
-    // Wait a moment for opencode to start
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // Run /init to create/update AGENTS.md
     // terminal.sendText('/init', true);
-
-    // Wait for init to complete
     // await new Promise(resolve => setTimeout(resolve, 1000));
 
     this.isInitialized = true;

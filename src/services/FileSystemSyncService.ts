@@ -178,7 +178,6 @@ export class FileSystemSyncService {
       // Check if file already exists
       try {
         await fs.access(fullPath);
-        console.log(`File ${fullPath} already exists, skipping creation`);
         return {
           type: 'create-file',
           node
@@ -205,13 +204,11 @@ export class FileSystemSyncService {
       // Check if element already exists in registry
       const registry = this.codeElementRegistry.get(filePath);
       if (registry?.has(node.name)) {
-        console.log(`Element ${node.name} already exists in ${filePath}, checking file...`);
         
         // Double-check in actual file
         try {
           const content = await fs.readFile(fullFilePath, 'utf-8');
           if (await this.elementExistsInFile(content, node.name, node.type)) {
-            console.log(`Element ${node.name} confirmed in file, skipping creation`);
             return {
               type: 'create-placeholder',
               node
@@ -579,7 +576,6 @@ export class FileSystemSyncService {
     
     // Check if element already exists
     if (await this.elementExistsInFile(content, node.name, node.type)) {
-      console.log(`Element ${node.name} already exists in ${filePath}, skipping`);
       return;
     }
     
@@ -897,21 +893,21 @@ export class FileSystemSyncService {
   /**
    * Show revert notification with action button
    */
-  async showRevertNotification(operations: SyncOperation[], revertToken: string): Promise<boolean> {
-    const message = `${operations.map(op => op.type).join(', ')} operations were performed on the file system. Would you like to revert?`;
-    const action = await vscode.window.showWarningMessage(
-      message,
-      { modal: false },
-      'Revert Changes',
-      'Keep Changes'
-    );
+  // async showRevertNotification(operations: SyncOperation[], revertToken: string): Promise<boolean> {
+  //   const message = `${operations.map(op => op.type).join(', ')} operations were performed on the file system. Would you like to revert?`;
+  //   const action = await vscode.window.showWarningMessage(
+  //     message,
+  //     { modal: false },
+  //     'Revert Changes',
+  //     'Keep Changes'
+  //   );
 
-    if (action === 'Revert Changes') {
-      return await this.revertToSnapshot(revertToken);
-    }
+  //   if (action === 'Revert Changes') {
+  //     return await this.revertToSnapshot(revertToken);
+  //   }
 
-    return false;
-  }
+  //   return false;
+  // }
 
   /**
    * Get snapshot history for debugging

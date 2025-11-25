@@ -76,6 +76,8 @@ export const CodocEditor: React.FC = () => {
   const editorRef = useRef<ReactCodeMirrorRef>(null);
   const feedforwardTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const savedCursorPosRef = useRef<number | null>(null);
+  const lastPreviewedLineRef = useRef<number>(-1);
+  const previewDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Get EditorView instance from the ref
   const getEditorView = (): EditorView | null => {
@@ -117,13 +119,12 @@ export const CodocEditor: React.FC = () => {
       const message = event.data;
       const view = getEditorView();
 
-      // Save cursor position before content updates
-      if (message.type === 'contentUpdate' && view) {
-        savedCursorPosRef.current = view.state.selection.main.head;
-      }
-
       switch (message.type) {
         case 'contentUpdate':
+          // Save cursor position before update if requested
+          if (message.preserveCursor && view) {
+            savedCursorPosRef.current = view.state.selection.main.head;
+          }
           setContent(message.content);
           break;
 
@@ -210,6 +211,10 @@ export const CodocEditor: React.FC = () => {
       if (feedforwardTimeoutRef.current) {
         clearTimeout(feedforwardTimeoutRef.current);
       }
+      // Clean up preview debounce timer on unmount
+      if (previewDebounceTimerRef.current) {
+        clearTimeout(previewDebounceTimerRef.current);
+      }
     };
   }, [parsedSchema, codebase]);
 
@@ -223,12 +228,22 @@ export const CodocEditor: React.FC = () => {
     }
   }, [dependencyGraph]);
 
-  const handleSyncCodebase = useCallback(() => {
-    // Save cursor position before sync
-    const view = getEditorView();
-    if (view) {
-      savedCursorPosRef.current = view.state.selection.main.head;
+  // Restore cursor position after content updates
+  useEffect(() => {
+    if (savedCursorPosRef.current !== null) {
+      const view = getEditorView();
+      if (view) {
+        const pos = Math.min(savedCursorPosRef.current, content.length);
+        view.dispatch({
+          selection: { anchor: pos, head: pos },
+          scrollIntoView: true
+        });
+        savedCursorPosRef.current = null;
+      }
     }
+  }, [content]);
+
+  const handleSyncCodebase = useCallback(() => {
     vscode.postMessage({ type: 'syncCodebase' });
   }, []);
 
@@ -260,20 +275,6 @@ export const CodocEditor: React.FC = () => {
 
   const handleContentChange = useCallback((value: string) => {
     setContent(value);
-    
-    // Restore cursor position if we have a saved one (from sync/preview operations)
-    if (savedCursorPosRef.current !== null) {
-      const view = getEditorView();
-      if (view) {
-        const pos = Math.min(savedCursorPosRef.current, value.length);
-        view.dispatch({
-          selection: { anchor: pos, head: pos },
-          scrollIntoView: true
-        });
-        savedCursorPosRef.current = null;
-      }
-    }
-    
     vscode.postMessage({
       type: 'contentChanged',
       content: value
@@ -285,11 +286,40 @@ export const CodocEditor: React.FC = () => {
 
   // Handle cursor position changes for preview
   const handleCursorChange = useCallback((cursorLine: number) => {
-    vscode.postMessage({
-      type: 'cursorPositionChanged',
-      lineNumber: cursorLine + 1, // Convert to 1-based
-      parsedSchema
-    });
+    // Only trigger preview if cursor moved to a different line
+    if (cursorLine === lastPreviewedLineRef.current) {
+      return;
+    }
+
+    // Clear any pending preview requests
+    if (previewDebounceTimerRef.current) {
+      clearTimeout(previewDebounceTimerRef.current);
+    }
+
+    // Debounce preview requests (only trigger after cursor stops moving)
+    previewDebounceTimerRef.current = setTimeout(() => {
+      // Check if there's a node at this line
+      const hasNodeAtLine = parsedSchema.some(node => {
+        const checkNode = (n: SchemaNode): boolean => {
+          if (n.lineNumber === cursorLine + 1) return true;
+          if (n.children) {
+            return n.children.some(checkNode);
+          }
+          return false;
+        };
+        return checkNode(node);
+      });
+
+      // Only send message if there's a node at this line
+      if (hasNodeAtLine) {
+        lastPreviewedLineRef.current = cursorLine;
+        vscode.postMessage({
+          type: 'cursorPositionChanged',
+          lineNumber: cursorLine + 1, // Convert to 1-based
+          parsedSchema
+        });
+      }
+    }, 300); // 300ms debounce - only trigger after cursor settles
   }, [parsedSchema]);
 
   // Combine all extensions

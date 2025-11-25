@@ -106,14 +106,12 @@ export class PreviewService {
 
         const fullPath = path.join(this.workspaceRoot, filePath);
         const fileUri = vscode.Uri.file(fullPath);
-        console.log(`Opening file ${filePath} for element ${node.name}`);
 
         try {
             const document = await vscode.workspace.openTextDocument(fileUri);
 
             // Find the element position in the file
             const position = await this.findElementPosition(document, node);
-            console.log(`Element ${node.name} position:`, position);
 
             const editor = await vscode.window.showTextDocument(document, {
                 viewColumn: this.config.viewColumn,
