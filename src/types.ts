@@ -180,3 +180,13 @@ export interface VisualHierarchyRule {
   fullOpacity: string[]; // Node selectors to keep at opacity 1.0
   dimmedOpacity: number; // Opacity for other nodes
 }
+
+
+
+export type FileDiff = {
+  file: string
+  before: string
+  after: string
+  additions: number
+  deletions: number
+}

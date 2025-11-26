@@ -8,10 +8,15 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { SchemaNode, StructuralDiff, DependencyGraph } from '../types';
+import { SchemaNode, StructuralDiff, DependencyGraph } from '../types.js';
 import * as parser from '@babel/parser';
-import traverse from '@babel/traverse';
-import generate from '@babel/generator';
+import traverseModule, { NodePath } from '@babel/traverse';
+import generateModule from '@babel/generator';
+import * as t from '@babel/types';
+
+// Handle ESM default exports
+const traverse = (traverseModule as any).default || traverseModule;
+const generate = (generateModule as any).default || generateModule;
 
 export interface SyncOperation {
   type: 'create-file' | 'create-folder' | 'create-placeholder' | 'delete' | 'rename' | 'move';
@@ -607,13 +612,13 @@ export class FileSystemSyncService {
         
         let removed = false;
         traverse(ast, {
-          FunctionDeclaration(path) {
+          FunctionDeclaration(path: NodePath<t.FunctionDeclaration>) {
             if (path.node.id?.name === name) {
               path.remove();
               removed = true;
             }
           },
-          VariableDeclarator(path) {
+          VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
             if (path.node.id.type === 'Identifier' && path.node.id.name === name) {
               // Remove the entire variable declaration
               const parent = path.parentPath;
@@ -623,13 +628,13 @@ export class FileSystemSyncService {
               }
             }
           },
-          ClassDeclaration(path) {
+          ClassDeclaration(path: NodePath<t.ClassDeclaration>) {
             if (path.node.id?.name === name) {
               path.remove();
               removed = true;
             }
           },
-          ExportNamedDeclaration(path) {
+          ExportNamedDeclaration(path: NodePath<t.ExportNamedDeclaration>) {
             const declaration = path.node.declaration;
             if (declaration) {
               if (declaration.type === 'FunctionDeclaration' && declaration.id?.name === name) {
@@ -637,7 +642,7 @@ export class FileSystemSyncService {
                 removed = true;
               } else if (declaration.type === 'VariableDeclaration') {
                 const declarator = declaration.declarations.find(
-                  d => d.id.type === 'Identifier' && d.id.name === name
+                  (d: any) => d.id.type === 'Identifier' && d.id.name === name
                 );
                 if (declarator) {
                   path.remove();
@@ -649,7 +654,7 @@ export class FileSystemSyncService {
               }
             }
           },
-          ExportDefaultDeclaration(path) {
+          ExportDefaultDeclaration(path: NodePath<t.ExportDefaultDeclaration>) {
             const declaration = path.node.declaration;
             if (declaration.type === 'FunctionDeclaration' && declaration.id?.name === name) {
               path.remove();
@@ -725,19 +730,19 @@ export class FileSystemSyncService {
         
         let renamed = false;
         traverse(ast, {
-          FunctionDeclaration(path) {
+          FunctionDeclaration(path: NodePath<t.FunctionDeclaration>) {
             if (path.node.id?.name === oldName) {
               path.node.id.name = newName;
               renamed = true;
             }
           },
-          VariableDeclarator(path) {
+          VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
             if (path.node.id.type === 'Identifier' && path.node.id.name === oldName) {
               path.node.id.name = newName;
               renamed = true;
             }
           },
-          ClassDeclaration(path) {
+          ClassDeclaration(path: NodePath<t.ClassDeclaration>) {
             if (path.node.id?.name === oldName) {
               path.node.id.name = newName;
               renamed = true;

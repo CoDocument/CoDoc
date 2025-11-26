@@ -3,9 +3,9 @@
  * Builds hierarchical SchemaNode tree with validation
  */
 
-import { SchemaNode } from "../types";
-import { CodocLexer } from "./lexer";
-import { lineParser, CodocLineParser } from "./lineParser";
+import { SchemaNode } from "../types.js";
+import { CodocLexer } from "./lexer.js";
+import { lineParser, CodocLineParser } from "./lineParser.js";
 import * as crypto from "crypto";
 
 interface ParsingContext {

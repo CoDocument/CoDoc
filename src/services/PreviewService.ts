@@ -7,7 +7,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { SchemaNode } from '../types';
+import { SchemaNode } from '../types.js';
 
 export interface PreviewConfig {
     enabled: boolean;

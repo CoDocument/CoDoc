@@ -3,7 +3,7 @@
  * Analyzes dependency impact when user edits CODOC nodes
  */
 
-import { SchemaNode, DependencyGraph, SuggestedChange, ImpactAnalysis } from '../types';
+import { SchemaNode, DependencyGraph, SuggestedChange, ImpactAnalysis } from '../types.js';
 import { OpenAI } from 'openai';
 
 export class ImpactAnalysisService {

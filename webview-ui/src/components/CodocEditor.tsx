@@ -48,6 +48,14 @@ import { fileStructureExtension } from '../lib/editor/fileStructureExtension';
 import { feedbackDecorationExtension, showFeedbackDecorationsInView, clearFeedbackDecorationsInView, CodocMergeChange } from '../lib/editor/feedbackDecorationExtension';
 import { feedforwardExtension, applyFeedforwardSuggestions, clearFeedforwardSuggestions, type FeedforwardSuggestion } from '../lib/editor/feedforwardService';
 import { dependencyHighlightExtension, setDependencyGraphInView, highlightAffectedNodesInView, DependencyGraph as DependencyGraphType } from '../lib/editor/dependencyHighlightExtension';
+import { 
+  activityGutterExtension, 
+  addGutterActivityInView, 
+  clearGutterActivitiesInView,
+  findLineForElement,
+  GutterActivityDecoration 
+} from '../lib/editor/activityGutterExtension';
+import { ActivityStream, ActivityItem } from './ActivityStream';
 import { SchemaNode } from '../types';
 
 // VSCode API
@@ -73,6 +81,7 @@ export const CodocEditor: React.FC = () => {
   const [parsedSchema, setParsedSchema] = useState<SchemaNode[]>([]);
   const [codebase, setCodebase] = useState<any[]>([]);
   const [dependencyGraph, setDependencyGraph] = useState<DependencyGraphType | null>(null);
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
   const editorRef = useRef<ReactCodeMirrorRef>(null);
   const feedforwardTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const savedCursorPosRef = useRef<number | null>(null);
@@ -300,6 +309,74 @@ export const CodocEditor: React.FC = () => {
             clearFeedforwardSuggestions(view);
           }
           break;
+
+        case 'generationProgress':
+          // Show generation progress in UI
+          // message.stage: 'starting' | 'thinking' | 'editing' | 'executing' | 'complete' | 'error'
+          // message.message: progress message string
+          console.log(`[Generation] ${message.stage}: ${message.message}`);
+          break;
+
+        case 'generationComplete':
+          // Generation finished successfully
+          console.log(`[Generation Complete] ${message.summary || 'Done'}`);
+          if (message.fileChanges && message.fileChanges.length > 0) {
+            console.log(`Files modified:`, message.fileChanges);
+          }
+          break;
+
+        case 'activityEvent':
+          // Activity stream events from OpenCode SDK
+          if (message.event) {
+            const event = message.event;
+            const newItem: ActivityItem = {
+              id: event.id || `activity-${Date.now()}`,
+              type: event.eventType,
+              message: event.message,
+              timestamp: event.timestamp || Date.now(),
+              filePath: event.filePath,
+              componentName: event.componentName,
+              additions: event.additions,
+              deletions: event.deletions
+            };
+            setActivityItems(prev => {
+              // Keep max 50 items
+              const updated = [...prev, newItem];
+              return updated.slice(-50);
+            });
+          }
+          break;
+
+        case 'gutterDecoration':
+          // Gutter decoration for tool activities
+          if (view && message.decoration) {
+            const decoration = message.decoration as GutterActivityDecoration;
+            // Try to find the line for this element in the CoDoc
+            const lineNumber = findLineForElement(
+              view, 
+              decoration.filePath || '',
+              decoration.componentName
+            );
+            if (lineNumber) {
+              addGutterActivityInView(view, {
+                ...decoration,
+                lineNumber
+              });
+            }
+          }
+          break;
+
+        case 'clearActivityStream':
+          // Clear all activity stream items
+          setActivityItems([]);
+          break;
+
+        case 'clearGutterDecorations':
+          // Clear all gutter decorations
+          if (view) {
+            clearGutterActivitiesInView(view);
+          }
+          break;
       }
     };
 
@@ -453,6 +530,7 @@ export const CodocEditor: React.FC = () => {
     ...feedbackDecorationExtension(),   // Feedback from StructuralDiffEngine
     ...feedforwardExtension(),          // Suggestions from ImpactAnalysisService
     ...dependencyHighlightExtension(),  // Dependency-based opacity highlighting
+    activityGutterExtension(),          // AI activity gutter icons
     EditorView.updateListener.of((update) => {
       // Track cursor position changes
       if (update.selectionSet) {
@@ -549,7 +627,8 @@ export const CodocEditor: React.FC = () => {
           flex: 1,
           fontSize: '14px',
           lineHeight: '1.6',
-          height: '100%'
+          height: '100%',
+          minHeight: 0  // Allow flex shrink
         }}
         basicSetup={{
           lineNumbers: true,
@@ -575,6 +654,9 @@ export const CodocEditor: React.FC = () => {
           lintKeymap: true,
         }}
       />
+
+      {/* Activity stream at bottom */}
+      <ActivityStream activities={activityItems} maxVisible={3} />
     </div>
   );
 };

@@ -8,7 +8,7 @@
  * - Compare: Identify all structural changes made by AI
  */
 
-import { SchemaNode, StructuralDiff, RenamedNode, AIChange } from '../types';
+import { SchemaNode, StructuralDiff, RenamedNode, AIChange } from '../types.js';
 import * as crypto from 'crypto';
 
 export class StructuralDiffEngine {

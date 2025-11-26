@@ -3,17 +3,19 @@
  */
 
 import * as vscode from 'vscode';
-import { AnalysisEngine } from '../services/AnalysisEngine';
-import { structuralDiffEngine } from '../services/StructuralDiffEngine';
-import { openCodeService } from '../services/OpenCodeService';
-import { impactAnalysisService } from '../services/ImpactAnalysisService';
-import { codeChangeAnalyzer } from '../services/CodeChangeAnalyzer';
-import { promptPreparationService } from '../services/PromptPreparationService';
-import { MockGenerationService } from '../services/MockGenerationService';
-import { FileSystemSyncService } from '../services/FileSystemSyncService';
-import { PreviewService } from '../services/PreviewService';
-import { SchemaNode, CodebaseSnapshot, EditorState } from '../types';
-import { codocParser } from '../parser/codocParser';
+import { AnalysisEngine } from '../services/AnalysisEngine.js';
+import { structuralDiffEngine } from '../services/StructuralDiffEngine.js';
+import { openCodeSDKService } from '../services/agent/OpenCodeSDKService.js';
+import { impactAnalysisService } from '../services/ImpactAnalysisService.js';
+import { codeChangeAnalyzer } from '../services/CodeChangeAnalyzer.js';
+import { promptPreparationService } from '../services/PromptPreparationService.js';
+import { MockGenerationService } from '../services/agent/MockGenerationService.js';
+import { FileSystemSyncService } from '../services/FileSystemSyncService.js';
+import { PreviewService } from '../services/PreviewService.js';
+// import { FileChangeTracker } from '../services/FileChangeTracker.js';
+import { SchemaNode, CodebaseSnapshot, EditorState } from '../types.js';
+import { codocParser } from '../parser/codocParser.js';
+import { ActivityEvent, GutterDecoration, ActivityEventCallbacks } from '../services/agent/ActivityEventTypes.js';
 
 export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   private context: vscode.ExtensionContext;
@@ -23,12 +25,16 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   private analysisEngine: AnalysisEngine | null = null;
   private fileSystemSyncService: FileSystemSyncService | null = null;
   private previewService: PreviewService | null = null;
+  // private fileChangeTracker: FileChangeTracker | null = null;
   private previousContent: string = '';
   private previousSchema: SchemaNode[] = [];
 
   // Store CoDoc snapshot BEFORE generation for AI change detection
   private preGenerationCoDoc: SchemaNode[] = [];
   private preGenerationSnapshot: CodebaseSnapshot | null = null;
+  
+  // Track generation state
+  private isGenerating: boolean = false;
 
   // Debounce timer for CoDoc changes
   private syncDebounceTimer: NodeJS.Timeout | null = null;
@@ -40,6 +46,67 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
   }
+
+  /**
+   * Setup activity callbacks to forward OpenCode events to webview
+   */
+  private setupActivityCallbacks(webviewPanel: vscode.WebviewPanel): void {
+    const callbacks: ActivityEventCallbacks = {
+      onActivity: (event: ActivityEvent) => {
+        webviewPanel.webview.postMessage({
+          type: 'activityEvent',
+          event: {
+            id: event.id,
+            eventType: event.type,
+            message: event.message,
+            timestamp: event.timestamp,
+            filePath: event.filePath,
+            componentName: event.componentName,
+            additions: event.additions,
+            deletions: event.deletions
+          }
+        });
+      },
+      onGutterDecoration: (decoration: GutterDecoration) => {
+        webviewPanel.webview.postMessage({
+          type: 'gutterDecoration',
+          decoration
+        });
+      },
+      onSummary: (summary) => {
+        // Show completion notification
+        if (summary.title) {
+          vscode.window.showInformationMessage(`✓ ${summary.title}`);
+        }
+      },
+      onComplete: () => {
+        webviewPanel.webview.postMessage({
+          type: 'activityEvent',
+          event: {
+            id: `complete_${Date.now()}`,
+            eventType: 'complete',
+            message: 'Generation complete!',
+            timestamp: Date.now()
+          }
+        });
+      },
+      onError: (error: string) => {
+        webviewPanel.webview.postMessage({
+          type: 'activityEvent',
+          event: {
+            id: `error_${Date.now()}`,
+            eventType: 'error',
+            message: error,
+            timestamp: Date.now()
+          }
+        });
+        vscode.window.showErrorMessage(`Generation error: ${error}`);
+      }
+    };
+
+    openCodeSDKService.setActivityCallbacks(callbacks);
+  }
+
 
   async resolveCustomTextEditor(
     document: vscode.TextDocument,
@@ -94,7 +161,11 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       const workspaceRoot = workspaceFolder.uri.fsPath;
       this.fileSystemSyncService = new FileSystemSyncService(workspaceRoot);
       this.previewService = new PreviewService(workspaceRoot);
+      // this.fileChangeTracker = new FileChangeTracker(workspaceRoot);
     }
+
+    // Setup activity event callbacks for the webview
+    this.setupActivityCallbacks(webviewPanel);
 
     // Send initial content
     this.sendContentToWebview(document.getText());
@@ -501,6 +572,11 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
+    if (this.isGenerating) {
+      vscode.window.showWarningMessage('Code generation already in progress');
+      return;
+    }
+
     try {
       const workDir = vscode.workspace.workspaceFolders[0].uri.fsPath;
       const currentContent = this.currentDocument.getText();
@@ -513,17 +589,18 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       this.preGenerationSnapshot = await this.analysisEngine.scanCodebase();
       this.preGenerationCoDoc = this.analysisEngine.constructCodoc(this.preGenerationSnapshot);
 
-      // Get last generation summary from history
-      const history = await openCodeService.loadHistory(workDir);
-      const lastGenerationSummary = history.length > 0
-        ? history[history.length - 1].summary
-        : undefined;
+      // Clear any previous feedback decorations
+      if (this.currentPanel) {
+        this.currentPanel.webview.postMessage({
+          type: 'clearFeedbackDecorations'
+        });
+      }
 
       // Prepare comprehensive prompt with CoDoc structure and changes
       const preparedPrompt = await promptPreparationService.preparePrompt({
         currentCoDocContent: currentContent,
         previousCoDocContent: this.previousContent || undefined,
-        lastGenerationSummary,
+        lastGenerationSummary: undefined,
         workspaceRoot: workDir
       });
 
@@ -539,82 +616,224 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 ${prompt}`;
       }
 
+      this.isGenerating = true;
+
+      // Start tracking file changes
+      // if (this.fileChangeTracker) {
+      //   this.fileChangeTracker.startTracking();
+      // }
+
+      // Show output channel
+      openCodeSDKService.showOutput();
+
       vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: 'Generating code with OpenCode...',
         cancellable: false
       }, async (progress) => {
-        progress.report({ message: 'Preparing prompt and context...' });
+        progress.report({ message: 'Initializing OpenCode...' });
 
-        // Show info about the generation
-        vscode.window.showInformationMessage(
-          'OpenCode is generating code. This may take a few minutes...'
+        // Generate code with real-time progress tracking
+        const result = await openCodeSDKService.generate(
+          finalPrompt,
+          workDir,
+          // Progress callback
+          async (progressUpdate) => {
+            progress.report({ message: progressUpdate.message });
+
+            // Send progress updates to webview
+            if (this.currentPanel) {
+              this.currentPanel.webview.postMessage({
+                type: 'generationProgress',
+                stage: progressUpdate.stage,
+                message: progressUpdate.message
+              });
+            }
+
+            // When generation completes, analyze changes
+            if (progressUpdate.stage === 'complete') {
+              await this.handleGenerationComplete(workDir, currentContent, progress);
+            } else if (progressUpdate.stage === 'error') {
+              this.isGenerating = false;
+              // if (this.fileChangeTracker) {
+              //   this.fileChangeTracker.stopTracking();
+              // }
+            }
+          },
+          // File change callback - incremental updates
+          async (fileChange) => {
+            // Trigger incremental CoDoc update when files change
+            await this.handleIncrementalUpdate(fileChange.path);
+          }
         );
 
-        const response = await openCodeService.generate({
-          prompt: finalPrompt,
-          contextFiles: contextFiles || [],
-          workDir
-        });
-
-        if (response.success) {
-          progress.report({ message: 'Code generated, rescanning codebase...' });
-
-          // Store history BEFORE rescanning
-          await openCodeService.storeHistory(
-            workDir,
-            prompt || 'CoDoc structure implementation',
-            response.output,
-            response.summary,
-            []
-          );
-
-          // Store current content as previous for next iteration
-          this.previousContent = currentContent;
-
-          // Wait a moment for file system to settle
-          await new Promise(resolve => setTimeout(resolve, 1000));
-
-          // STEP 2: Rescan codebase and reconstruct new CoDoc (AI changes reflected here)
-          await this.syncCodebase();
-
-          progress.report({ message: 'Analyzing AI-generated changes...' });
-
-          // STEP 3: Compare pre-generation CoDoc with post-generation CoDoc
-          const postGenerationSnapshot = await this.analysisEngine!.scanCodebase();
-          const postGenerationCoDoc = this.analysisEngine!.constructCodoc(postGenerationSnapshot);
-
-          // Use StructuralDiffEngine to identify ALL changes
-          const diff = structuralDiffEngine.compare(this.preGenerationCoDoc, postGenerationCoDoc);
-
-          // Convert structural diff to AIChange[] with comprehensive classification
-          const aiChanges = structuralDiffEngine.convertToAIChanges(diff);
-
-          progress.report({ message: 'Displaying AI feedback...' });
-
-          // Send AI changes to webview for feedback decorations
-          if (this.currentPanel) {
-            this.currentPanel.webview.postMessage({
-              type: 'showFeedbackDecorations',
-              changes: aiChanges
-            });
-
-            this.currentPanel.webview.postMessage({
-              type: 'generationComplete',
-              summary: response.summary,
-              output: response.output
-            });
-          }
-
-          vscode.window.showInformationMessage(
-            `✓ Code generation complete! ${aiChanges.length} AI changes detected in CoDoc structure.`
-          );
-        } else {
-          vscode.window.showErrorMessage(`Generation failed: ${response.error}`);
+        if (!result.success) {
+          vscode.window.showErrorMessage(`Generation failed: ${result.error}`);
+          this.isGenerating = false;
+          // if (this.fileChangeTracker) {
+          //   this.fileChangeTracker.stopTracking();
+          // }
         }
       });
     } catch (error) {
+      this.isGenerating = false;
+      // if (this.fileChangeTracker) {
+      //   this.fileChangeTracker.stopTracking();
+      // }
       vscode.window.showErrorMessage(`Generation failed: ${error}`);
+    }
+  }
+
+  /**
+   * Handle incremental CoDoc updates as files change during generation
+   */
+  private async handleIncrementalUpdate(changedFilePath: string): Promise<void> {
+    if (!this.analysisEngine || !this.currentPanel) {
+      return;
+    }
+
+    try {
+      // Rescan and update CoDoc incrementally
+      const snapshot = await this.analysisEngine.scanCodebase();
+      const newSchema = this.analysisEngine.constructCodoc(snapshot);
+
+      // Compare with pre-generation state to show cumulative changes
+      const diff = structuralDiffEngine.compare(this.preGenerationCoDoc, newSchema);
+      const aiChanges = structuralDiffEngine.convertToAIChanges(diff);
+
+      // Update CoDoc content in editor
+      const codocContent = this.generateCodocContent('project', newSchema);
+      
+      if (this.currentDocument) {
+        this.isUpdatingProgrammatically = true;
+        try {
+          const edit = new vscode.WorkspaceEdit();
+          const fullRange = new vscode.Range(
+            this.currentDocument.positionAt(0),
+            this.currentDocument.positionAt(this.currentDocument.getText().length)
+          );
+          edit.replace(this.currentDocument.uri, fullRange, codocContent);
+          await vscode.workspace.applyEdit(edit);
+        } finally {
+          this.isUpdatingProgrammatically = false;
+        }
+      }
+
+      // Send incremental updates to webview
+      this.currentPanel.webview.postMessage({
+        type: 'contentUpdate',
+        content: codocContent,
+        preserveCursor: true
+      });
+
+      // Update feedback decorations with cumulative changes
+      this.currentPanel.webview.postMessage({
+        type: 'showFeedbackDecorations',
+        changes: aiChanges
+      });
+    } catch (error) {
+      console.error('Incremental update failed:', error);
+    }
+  }
+
+  /**
+   * Handle generation completion - final analysis and feedback
+   */
+  private async handleGenerationComplete(
+    workDir: string,
+    originalContent: string,
+    progress: vscode.Progress<{ message?: string }>
+  ): Promise<void> {
+    try {
+      progress.report({ message: 'Finalizing changes...' });
+
+      // Stop tracking file changes
+      // const fileChanges = this.fileChangeTracker?.stopTracking() || [];
+
+      // Wait for file system to settle
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // STEP 2: Final rescan and CoDoc reconstruction
+      if (!this.analysisEngine) {
+        return;
+      }
+
+      progress.report({ message: 'Analyzing AI-generated changes...' });
+
+      const postGenerationSnapshot = await this.analysisEngine.scanCodebase();
+      const postGenerationCoDoc = this.analysisEngine.constructCodoc(postGenerationSnapshot);
+
+      // STEP 3: Compare pre-generation CoDoc with post-generation CoDoc
+      const diff = structuralDiffEngine.compare(this.preGenerationCoDoc, postGenerationCoDoc);
+      const aiChanges = structuralDiffEngine.convertToAIChanges(diff);
+
+      // Update CoDoc content
+      const codocContent = this.generateCodocContent('project', postGenerationCoDoc);
+      
+      if (this.currentDocument) {
+        this.isUpdatingProgrammatically = true;
+        try {
+          const edit = new vscode.WorkspaceEdit();
+          const fullRange = new vscode.Range(
+            this.currentDocument.positionAt(0),
+            this.currentDocument.positionAt(this.currentDocument.getText().length)
+          );
+          edit.replace(this.currentDocument.uri, fullRange, codocContent);
+          await vscode.workspace.applyEdit(edit);
+        } finally {
+          this.isUpdatingProgrammatically = false;
+        }
+      }
+
+      // Update editor state
+      this.editorState = {
+        content: codocContent,
+        parsedSchema: postGenerationCoDoc,
+        dependencyGraph: postGenerationSnapshot.dependencyGraph,
+        focusedNodeId: null,
+        generationHistory: this.editorState?.generationHistory || []
+      };
+
+      // Store current content as previous for next iteration
+      this.previousContent = originalContent;
+      this.previousSchema = postGenerationCoDoc;
+
+      progress.report({ message: 'Displaying AI feedback...' });
+
+      // Send final updates to webview
+      if (this.currentPanel) {
+        this.currentPanel.webview.postMessage({
+          type: 'contentUpdate',
+          content: codocContent,
+          preserveCursor: false
+        });
+
+        this.currentPanel.webview.postMessage({
+          type: 'codebaseScanned',
+          snapshot: postGenerationSnapshot,
+          parsedSchema: postGenerationCoDoc
+        });
+
+        this.currentPanel.webview.postMessage({
+          type: 'showFeedbackDecorations',
+          changes: aiChanges
+        });
+
+        this.currentPanel.webview.postMessage({
+          type: 'generationComplete',
+          success: true
+        });
+      }
+
+      vscode.window.showInformationMessage(
+        `Code generation complete! ${aiChanges.length} AI changes detected.`
+      );
+
+      this.isGenerating = false;
+    } catch (error) {
+      console.error('Generation completion failed:', error);
+      this.isGenerating = false;
+      vscode.window.showErrorMessage(`Failed to complete generation: ${error}`);
     }
   }
 

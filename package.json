@@ -4,6 +4,7 @@
   "description": "Lightweight CODOC editor with OpenCode integration and dependency-aware code generation",
   "version": "0.1.0",
   "publisher": "codoc",
+  "type": "module",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -96,17 +97,18 @@
     "dev:webview": "cd webview-ui && npm run dev"
   },
   "devDependencies": {
+    "@babel/traverse": "^7.28.5",
     "@types/babel__generator": "^7.27.0",
     "@types/babel__traverse": "^7.28.0",
-    "@types/node": "^18.0.0",
+    "@types/node": "^24.10.1",
     "@types/vscode": "^1.80.0",
+    "chevrotain": "^11.0.3",
     "typescript": "^5.0.0"
   },
   "dependencies": {
     "@babel/parser": "^7.23.0",
-    "@babel/traverse": "^7.28.5",
     "@babel/types": "^7.23.0",
-    "chevrotain": "^10.5.0",
+    "@opencode-ai/sdk": "^1.0.112",
     "openai": "^6.9.1"
   }
 }

@@ -3,8 +3,8 @@
  * Handles CoDoc structure, changes, history, and context files
  */
 
-import { SchemaNode } from '../types';
-import { CodeChangeAnalyzer, CodeChange } from './CodeChangeAnalyzer';
+import { SchemaNode } from '../types.js';
+import { CodeChangeAnalyzer, CodeChange } from './CodeChangeAnalyzer.js';
 
 export interface PromptContext {
   currentCoDocContent: string;

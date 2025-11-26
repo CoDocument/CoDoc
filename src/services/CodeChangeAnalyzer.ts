@@ -2,9 +2,9 @@
  * CodeChangeAnalyzer - Analyzes code changes and classifies them for feedback
  */
 
-import { SchemaNode } from '../types';
-import { AnalysisEngine } from './AnalysisEngine';
-import { structuralDiffEngine } from './StructuralDiffEngine';
+import { SchemaNode } from '../types.js';
+import { AnalysisEngine } from './AnalysisEngine.js';
+import { structuralDiffEngine } from './StructuralDiffEngine.js';
 
 export interface CodeChange {
   type: 'add' | 'remove' | 'modify';

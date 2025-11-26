@@ -18,7 +18,7 @@ import {
   Equals,
   StringLiteral,
   NumberLiteral
-} from "./lexer";
+} from "./lexer.js";
 
 export class CodocLineParser extends CstParser {
   constructor() {

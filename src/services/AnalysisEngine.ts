@@ -6,7 +6,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { parse } from '@babel/parser';
-import traverse from '@babel/traverse';
+import traverseModule, { NodePath } from '@babel/traverse';
+import * as t from '@babel/types';
 import {
   CodebaseSnapshot,
   FileStructure,
@@ -15,8 +16,11 @@ import {
   DependencyNode,
   DependencyEdge,
   SchemaNode
-} from '../types';
+} from '../types.js';
 import * as crypto from 'crypto';
+
+// Handle ESM default export
+const traverse = (traverseModule as any).default || traverseModule;
 
 export class AnalysisEngine {
   private workspaceRoot: string;
@@ -147,13 +151,13 @@ export class AnalysisEngine {
 
       traverse(ast, {
         // Track imports
-        ImportDeclaration: (path) => {
+        ImportDeclaration: (path: NodePath<t.ImportDeclaration>) => {
           const source = path.node.source.value;
           fileImports.push(source);
         },
 
         // Function declarations
-        FunctionDeclaration: (path) => {
+        FunctionDeclaration: (path: NodePath<t.FunctionDeclaration>) => {
           const name = path.node.id?.name;
           if (!name) return;
 
@@ -178,7 +182,7 @@ export class AnalysisEngine {
         },
 
         // Arrow functions and components
-        VariableDeclarator: (path) => {
+        VariableDeclarator: (path: NodePath<t.VariableDeclarator>) => {
           const id = path.node.id;
           const init = path.node.init;
           const name = (id as any)?.name;
@@ -212,7 +216,7 @@ export class AnalysisEngine {
         },
 
         // Classes
-        ClassDeclaration: (path) => {
+        ClassDeclaration: (path: NodePath<t.ClassDeclaration>) => {
           const name = path.node.id?.name;
           if (!name) return;
 

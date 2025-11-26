@@ -1,6 +1,6 @@
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { RangeSetBuilder } from "@codemirror/state";
-import { CodocLexer } from "../../../../src/parser/lexer"; // Adjusted import path for standalone usage
+import { CodocLexer } from "../../../../src/parser/lexer.js"; // Adjusted import path for standalone usage
 
 /** Map Chevrotain token types to style classes */
 function styleOfTokenType(typeName: string): string {

@@ -3,8 +3,8 @@
  * Single source of truth for CODOC indentation rules
  */
 
-import { SchemaNode } from "../types";
-import { codocParser } from "./codocParser";
+import { SchemaNode } from "../types.js";
+import { codocParser } from "./codocParser.js";
 
 const INDENT_UNIT = 2; // CODOC standard: 2 spaces per level
 

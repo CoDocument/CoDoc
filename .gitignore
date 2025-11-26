@@ -14,3 +14,5 @@ webview/dist/
 *.log
 .env
 node_modules/
+
+opencode_logs.json

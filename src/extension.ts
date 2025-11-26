@@ -5,15 +5,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { CodocEditorProvider } from './providers/CodocEditorProvider';
-import { AnalysisEngine } from './services/AnalysisEngine';
-import { openCodeService } from './services/OpenCodeService';
+import { CodocEditorProvider } from './providers/CodocEditorProvider.js';
+import { AnalysisEngine } from './services/AnalysisEngine.js';
+// import { openCodeService } from './services/OpenCodeService.js';
 
 let editorProvider: CodocEditorProvider;
 let fileWatcher: vscode.FileSystemWatcher | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('CoDoc extension activated');
+  console.log('Extension host Node version:', process.version);
 
   // Register custom editor provider
   editorProvider = new CodocEditorProvider(context);
@@ -82,7 +83,7 @@ export function deactivate() {
     fileWatcher.dispose();
   }
   // Dispose OpenCode terminal
-  openCodeService.dispose();
+  // openCodeService.dispose();
 }
 
 /**
