@@ -133,7 +133,7 @@ export class OpenCodeSDKService {
                     this.outputChannel.show();
                     this.outputChannel.appendLine('=== OpenCode Server Setup ===');
                     this.outputChannel.appendLine('1. Open a terminal in your project root');
-                    this.outputChannel.appendLine('2. Run: opencode serve -p 4096 127.0.0.1');
+                    this.outputChannel.appendLine('2. Run: opencode serve -p 4096 --hostname 127.0.0.1');
                     this.outputChannel.appendLine('3. Wait for server to start');
                     this.outputChannel.appendLine('4. Try generating code again');
                 }

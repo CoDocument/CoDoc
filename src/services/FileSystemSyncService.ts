@@ -9,14 +9,18 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { SchemaNode, StructuralDiff, DependencyGraph } from '../types.js';
-import * as parser from '@babel/parser';
-import traverseModule, { NodePath } from '@babel/traverse';
-import generateModule from '@babel/generator';
-import * as t from '@babel/types';
-
-// Handle ESM default exports
-const traverse = (traverseModule as any).default || traverseModule;
-const generate = (generateModule as any).default || generateModule;
+import {
+  parseCode,
+  generateCode,
+  traverse,
+  t,
+  getDeclarationPatterns,
+  elementExistsInCode,
+  removeCodeElement,
+  renameCodeElement,
+  extractCodeElementContent,
+  removeCodeElementByRegex
+} from './BabelUtils.js';
 
 export interface SyncOperation {
   type: 'create-file' | 'create-folder' | 'create-placeholder' | 'delete' | 'rename' | 'move';
@@ -213,7 +217,7 @@ export class FileSystemSyncService {
         // Double-check in actual file
         try {
           const content = await fs.readFile(fullFilePath, 'utf-8');
-          if (await this.elementExistsInFile(content, node.name, node.type)) {
+          if (elementExistsInCode(content, node.name, node.type as 'function' | 'component')) {
             return {
               type: 'create-placeholder',
               node
@@ -530,57 +534,13 @@ export class FileSystemSyncService {
   }
 
   /**
-   * Check if element exists in file
-   */
-  private async elementExistsInFile(content: string, name: string, type: string): Promise<boolean> {
-    const ext = path.extname(content);
-    
-    // Use regex patterns to detect various declaration forms
-    const patterns = this.getDeclarationPatterns(name, type);
-    return patterns.some(pattern => pattern.test(content));
-  }
-  
-  /**
-   * Get all possible declaration patterns for an element
-   */
-  private getDeclarationPatterns(name: string, type: string): RegExp[] {
-    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
-    if (type === 'function') {
-      return [
-        new RegExp(`function\\s+${escapedName}\\s*\\(`),
-        new RegExp(`const\\s+${escapedName}\\s*=\\s*function`),
-        new RegExp(`const\\s+${escapedName}\\s*=\\s*\\([^)]*\\)\\s*=>`),
-        new RegExp(`const\\s+${escapedName}\\s*=\\s*async\\s*\\([^)]*\\)\\s*=>`),
-        new RegExp(`export\\s+function\\s+${escapedName}\\s*\\(`),
-        new RegExp(`export\\s+const\\s+${escapedName}\\s*=`),
-        new RegExp(`export\\s+async\\s+function\\s+${escapedName}\\s*\\(`),
-        new RegExp(`${escapedName}\\s*:\\s*function`),
-        new RegExp(`${escapedName}\\s*:\\s*\\([^)]*\\)\\s*=>`),
-      ];
-    } else if (type === 'component') {
-      return [
-        new RegExp(`function\\s+${escapedName}\\s*\\(`),
-        new RegExp(`const\\s+${escapedName}\\s*=\\s*\\([^)]*\\)\\s*=>`),
-        new RegExp(`class\\s+${escapedName}\\s+extends`),
-        new RegExp(`export\\s+function\\s+${escapedName}\\s*\\(`),
-        new RegExp(`export\\s+const\\s+${escapedName}\\s*=`),
-        new RegExp(`export\\s+default\\s+function\\s+${escapedName}`),
-        new RegExp(`export\\s+default\\s+class\\s+${escapedName}`),
-      ];
-    }
-    
-    return [];
-  }
-
-  /**
    * Add placeholder code robustly (AST-based, prevents duplicates)
    */
   private async addPlaceholderCodeRobust(filePath: string, node: SchemaNode): Promise<void> {
     let content = await fs.readFile(filePath, 'utf-8');
     
     // Check if element already exists
-    if (await this.elementExistsInFile(content, node.name, node.type)) {
+    if (elementExistsInCode(content, node.name, node.type as 'function' | 'component')) {
       return;
     }
     
@@ -602,114 +562,17 @@ export class FileSystemSyncService {
     const content = await fs.readFile(filePath, 'utf-8');
     const ext = path.extname(filePath);
     
-    try {
-      // Try AST-based removal for JS/TS files
-      if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) {
-        const ast = parser.parse(content, {
-          sourceType: 'module',
-          plugins: ['jsx', 'typescript']
-        });
-        
-        let removed = false;
-        traverse(ast, {
-          FunctionDeclaration(path: NodePath<t.FunctionDeclaration>) {
-            if (path.node.id?.name === name) {
-              path.remove();
-              removed = true;
-            }
-          },
-          VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
-            if (path.node.id.type === 'Identifier' && path.node.id.name === name) {
-              // Remove the entire variable declaration
-              const parent = path.parentPath;
-              if (parent.isVariableDeclaration()) {
-                parent.remove();
-                removed = true;
-              }
-            }
-          },
-          ClassDeclaration(path: NodePath<t.ClassDeclaration>) {
-            if (path.node.id?.name === name) {
-              path.remove();
-              removed = true;
-            }
-          },
-          ExportNamedDeclaration(path: NodePath<t.ExportNamedDeclaration>) {
-            const declaration = path.node.declaration;
-            if (declaration) {
-              if (declaration.type === 'FunctionDeclaration' && declaration.id?.name === name) {
-                path.remove();
-                removed = true;
-              } else if (declaration.type === 'VariableDeclaration') {
-                const declarator = declaration.declarations.find(
-                  (d: any) => d.id.type === 'Identifier' && d.id.name === name
-                );
-                if (declarator) {
-                  path.remove();
-                  removed = true;
-                }
-              } else if (declaration.type === 'ClassDeclaration' && declaration.id?.name === name) {
-                path.remove();
-                removed = true;
-              }
-            }
-          },
-          ExportDefaultDeclaration(path: NodePath<t.ExportDefaultDeclaration>) {
-            const declaration = path.node.declaration;
-            if (declaration.type === 'FunctionDeclaration' && declaration.id?.name === name) {
-              path.remove();
-              removed = true;
-            } else if (declaration.type === 'ClassDeclaration' && declaration.id?.name === name) {
-              path.remove();
-              removed = true;
-            }
-          }
-        });
-        
-        if (removed) {
-          const output = generate(ast, {}, content);
-          await fs.writeFile(filePath, output.code, 'utf-8');
-          return;
-        }
+    // Try AST-based removal for JS/TS files
+    if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) {
+      const result = removeCodeElement(content, name, type as 'function' | 'component');
+      if (result !== null) {
+        await fs.writeFile(filePath, result, 'utf-8');
+        return;
       }
-    } catch (error) {
-      console.warn(`AST-based removal failed for ${name}, falling back to regex: ${error}`);
     }
     
     // Fallback: regex-based removal
-    const patterns = this.getDeclarationPatterns(name, type);
-    let updatedContent = content;
-    
-    for (const pattern of patterns) {
-      const match = pattern.exec(updatedContent);
-      if (match) {
-        // Find the complete declaration including body
-        const startIndex = match.index;
-        let endIndex = startIndex;
-        let braceCount = 0;
-        let inDeclaration = false;
-        
-        for (let i = startIndex; i < updatedContent.length; i++) {
-          const char = updatedContent[i];
-          if (char === '{') {
-            braceCount++;
-            inDeclaration = true;
-          } else if (char === '}') {
-            braceCount--;
-            if (inDeclaration && braceCount === 0) {
-              endIndex = i + 1;
-              break;
-            }
-          }
-        }
-        
-        if (endIndex > startIndex) {
-          updatedContent = updatedContent.slice(0, startIndex) + updatedContent.slice(endIndex);
-          break;
-        }
-      }
-    }
-    
+    const updatedContent = removeCodeElementByRegex(content, name, type as 'function' | 'component');
     await fs.writeFile(filePath, updatedContent, 'utf-8');
   }
 
@@ -720,44 +583,13 @@ export class FileSystemSyncService {
     const content = await fs.readFile(filePath, 'utf-8');
     const ext = path.extname(filePath);
     
-    try {
-      // Try AST-based renaming for JS/TS files
-      if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) {
-        const ast = parser.parse(content, {
-          sourceType: 'module',
-          plugins: ['jsx', 'typescript']
-        });
-        
-        let renamed = false;
-        traverse(ast, {
-          FunctionDeclaration(path: NodePath<t.FunctionDeclaration>) {
-            if (path.node.id?.name === oldName) {
-              path.node.id.name = newName;
-              renamed = true;
-            }
-          },
-          VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
-            if (path.node.id.type === 'Identifier' && path.node.id.name === oldName) {
-              path.node.id.name = newName;
-              renamed = true;
-            }
-          },
-          ClassDeclaration(path: NodePath<t.ClassDeclaration>) {
-            if (path.node.id?.name === oldName) {
-              path.node.id.name = newName;
-              renamed = true;
-            }
-          }
-        });
-        
-        if (renamed) {
-          const output = generate(ast, {}, content);
-          await fs.writeFile(filePath, output.code, 'utf-8');
-          return;
-        }
+    // Try AST-based renaming for JS/TS files
+    if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) {
+      const result = renameCodeElement(content, oldName, newName);
+      if (result !== null) {
+        await fs.writeFile(filePath, result, 'utf-8');
+        return;
       }
-    } catch (error) {
-      console.warn(`AST-based renaming failed for ${oldName}, falling back to regex: ${error}`);
     }
     
     // Fallback: simple text replacement with word boundaries
@@ -775,34 +607,10 @@ export class FileSystemSyncService {
    */
   private async extractCodeElement(filePath: string, name: string, type: string): Promise<string> {
     const content = await fs.readFile(filePath, 'utf-8');
-    const patterns = this.getDeclarationPatterns(name, type);
+    const result = extractCodeElementContent(content, name, type as 'function' | 'component');
     
-    for (const pattern of patterns) {
-      const match = pattern.exec(content);
-      if (match) {
-        const startIndex = match.index;
-        let endIndex = startIndex;
-        let braceCount = 0;
-        let inDeclaration = false;
-        
-        for (let i = startIndex; i < content.length; i++) {
-          const char = content[i];
-          if (char === '{') {
-            braceCount++;
-            inDeclaration = true;
-          } else if (char === '}') {
-            braceCount--;
-            if (inDeclaration && braceCount === 0) {
-              endIndex = i + 1;
-              break;
-            }
-          }
-        }
-        
-        if (endIndex > startIndex) {
-          return content.slice(startIndex, endIndex);
-        }
-      }
+    if (result) {
+      return result;
     }
     
     throw new Error(`Element ${name} not found in ${filePath}`);
@@ -846,17 +654,15 @@ export class FileSystemSyncService {
     
     if (node.type === 'component' && (ext === '.tsx' || ext === '.jsx')) {
       return `export function ${node.name}() {
-  // TODO: Implement
   return <div>${node.name}</div>;
 }`;
     } else if (node.type === 'function') {
       return `export function ${node.name}() {
-  // TODO: Implement
   throw new Error('Not implemented');
 }`;
     }
     
-    return `// ${node.name}\n// TODO: Implement`;
+    return `// ${node.name}\n`;
   }
 
   /**

@@ -26,6 +26,17 @@ export interface SchemaNode {
   isExported?: boolean;
 }
 
+/**
+ * Import information for tracking file dependencies
+ */
+export interface ImportInfo {
+  source: string;           // Import path (e.g., './Login', 'react')
+  specifiers: string[];     // Imported names (e.g., ['Login', 'LoginProps'])
+  isDefault: boolean;       // Whether it's a default import
+  isNamespace: boolean;     // Whether it's import * as X
+  line: number;             // Line number in source file
+}
+
 export interface CodeElement {
   name: string;
   type: 'function' | 'component' | 'class' | 'interface' | 'type';
@@ -50,6 +61,7 @@ export interface FileStructure {
   contentHash: string;
   lastModified: number;
   size: number;
+  imports?: ImportInfo[]; // File-level import tracking
 }
 
 export interface CodebaseSnapshot {

@@ -5,8 +5,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parse } from '@babel/parser';
-import traverseModule, { NodePath } from '@babel/traverse';
+import { NodePath } from '@babel/traverse';
 import * as t from '@babel/types';
 import {
   CodebaseSnapshot,
@@ -15,12 +14,18 @@ import {
   DependencyGraph,
   DependencyNode,
   DependencyEdge,
-  SchemaNode
+  SchemaNode,
+  ImportInfo
 } from '../types.js';
 import * as crypto from 'crypto';
-
-// Handle ESM default export
-const traverse = (traverseModule as any).default || traverseModule;
+import {
+  parseCode,
+  traverse,
+  extractNodeContent,
+  isNodeExported,
+  extractFunctionCalls,
+  extractReferences
+} from './BabelUtils.js';
 
 export class AnalysisEngine {
   private workspaceRoot: string;
@@ -115,12 +120,15 @@ export class AnalysisEngine {
         elements: [],
         contentHash: this.calculateHash(code),
         lastModified: stats.mtime,
-        size: stats.size
+        size: stats.size,
+        imports: []
       };
 
-      // Extract code elements with dependencies
+      // Extract code elements and imports with dependencies
       if (this.isCodeFile(relativePath)) {
-        fileStructure.elements = await this.extractCodeElements(code, relativePath);
+        const { elements, imports } = await this.extractCodeElementsWithImports(code, relativePath);
+        fileStructure.elements = elements;
+        fileStructure.imports = imports;
       }
 
       return fileStructure;
@@ -131,60 +139,84 @@ export class AnalysisEngine {
   }
 
   /**
-   * Extract code elements with dependency tracking using Babel
+   * Extract code elements and file-level imports using Babel
    */
-  private async extractCodeElements(
+  private async extractCodeElementsWithImports(
     code: string,
     filePath: string
-  ): Promise<CodeElement[]> {
+  ): Promise<{ elements: CodeElement[]; imports: ImportInfo[] }> {
     const elements: CodeElement[] = [];
+    const imports: ImportInfo[] = [];
 
     try {
-      const ast = parse(code, {
-        sourceType: 'module',
-        plugins: ['jsx', 'typescript'],
-        errorRecovery: true
-      });
+      const ast = parseCode(code);
 
-      // Track imports at file level
-      const fileImports: string[] = [];
+      // Track imports at file level (paths only for element tracking)
+      const fileImportPaths: string[] = [];
 
       traverse(ast, {
-        // Track imports
-        ImportDeclaration: (path: NodePath<t.ImportDeclaration>) => {
-          const source = path.node.source.value;
-          fileImports.push(source);
+        // Track imports - extract detailed import info
+        ImportDeclaration: (nodePath: NodePath<t.ImportDeclaration>) => {
+          const source = nodePath.node.source.value;
+          fileImportPaths.push(source);
+
+          const specifiers: string[] = [];
+          let isDefault = false;
+          let isNamespace = false;
+
+          for (const specifier of nodePath.node.specifiers) {
+            if (specifier.type === 'ImportDefaultSpecifier') {
+              specifiers.push(specifier.local.name);
+              isDefault = true;
+            } else if (specifier.type === 'ImportNamespaceSpecifier') {
+              specifiers.push(specifier.local.name);
+              isNamespace = true;
+            } else if (specifier.type === 'ImportSpecifier') {
+              // For named imports, track both imported and local names
+              const imported = specifier.imported;
+              const importedName = imported.type === 'Identifier' ? imported.name : imported.value;
+              specifiers.push(importedName);
+            }
+          }
+
+          imports.push({
+            source,
+            specifiers,
+            isDefault,
+            isNamespace,
+            line: nodePath.node.loc?.start.line ?? 1
+          });
         },
 
         // Function declarations
-        FunctionDeclaration: (path: NodePath<t.FunctionDeclaration>) => {
-          const name = path.node.id?.name;
+        FunctionDeclaration: (nodePath: NodePath<t.FunctionDeclaration>) => {
+          const name = nodePath.node.id?.name;
           if (!name) return;
 
           const isComponent = /^[A-Z]/.test(name);
-          const isExported = this.isExported(path);
+          const isExported = isNodeExported(nodePath);
 
           const element: CodeElement = {
             name,
             type: isComponent ? 'component' : 'function',
             filePath,
-            line: path.node.loc?.start.line ?? 1,
-            column: path.node.loc?.start.column ?? 0,
+            line: nodePath.node.loc?.start.line ?? 1,
+            column: nodePath.node.loc?.start.column ?? 0,
             isExported,
-            content: this.extractNodeContent(code, path.node),
-            imports: [...fileImports],
+            content: extractNodeContent(code, nodePath.node),
+            imports: [...fileImportPaths],
             exports: isExported ? [name] : [],
-            calls: this.extractFunctionCalls(path),
-            references: this.extractReferences(path)
+            calls: extractFunctionCalls(nodePath),
+            references: extractReferences(nodePath)
           };
 
           elements.push(element);
         },
 
         // Arrow functions and components
-        VariableDeclarator: (path: NodePath<t.VariableDeclarator>) => {
-          const id = path.node.id;
-          const init = path.node.init;
+        VariableDeclarator: (nodePath: NodePath<t.VariableDeclarator>) => {
+          const id = nodePath.node.id;
+          const init = nodePath.node.init;
           const name = (id as any)?.name;
 
           if (!name || !init) return;
@@ -194,20 +226,20 @@ export class AnalysisEngine {
             init.type === 'FunctionExpression'
           ) {
             const isComponent = /^[A-Z]/.test(name);
-            const isExported = this.isExported(path);
+            const isExported = isNodeExported(nodePath);
 
             const element: CodeElement = {
               name,
               type: isComponent ? 'component' : 'function',
               filePath,
-              line: path.node.loc?.start.line ?? 1,
-              column: path.node.loc?.start.column ?? 0,
+              line: nodePath.node.loc?.start.line ?? 1,
+              column: nodePath.node.loc?.start.column ?? 0,
               isExported,
-              content: this.extractNodeContent(code, path.node),
-              imports: [...fileImports],
+              content: extractNodeContent(code, nodePath.node),
+              imports: [...fileImportPaths],
               exports: isExported ? [name] : [],
-              calls: this.extractFunctionCalls(path),
-              references: this.extractReferences(path)
+              calls: extractFunctionCalls(nodePath),
+              references: extractReferences(nodePath)
             };
 
             elements.push(element);
@@ -216,21 +248,21 @@ export class AnalysisEngine {
         },
 
         // Classes
-        ClassDeclaration: (path: NodePath<t.ClassDeclaration>) => {
-          const name = path.node.id?.name;
+        ClassDeclaration: (nodePath: NodePath<t.ClassDeclaration>) => {
+          const name = nodePath.node.id?.name;
           if (!name) return;
 
-          const isExported = this.isExported(path);
+          const isExported = isNodeExported(nodePath);
 
           const element: CodeElement = {
             name,
             type: 'class',
             filePath,
-            line: path.node.loc?.start.line ?? 1,
-            column: path.node.loc?.start.column ?? 0,
+            line: nodePath.node.loc?.start.line ?? 1,
+            column: nodePath.node.loc?.start.column ?? 0,
             isExported,
-            content: this.extractNodeContent(code, path.node),
-            imports: [...fileImports],
+            content: extractNodeContent(code, nodePath.node),
+            imports: [...fileImportPaths],
             exports: isExported ? [name] : [],
             calls: [],
             references: []
@@ -243,69 +275,7 @@ export class AnalysisEngine {
       console.warn(`Failed to extract elements from ${filePath}:`, error);
     }
 
-    return elements;
-  }
-
-  /**
-   * Extract function calls from AST path
-   */
-  private extractFunctionCalls(path: any): string[] {
-    const calls: string[] = [];
-    path.traverse({
-      CallExpression: (callPath: any) => {
-        const callee = callPath.node.callee;
-        if (callee.type === 'Identifier') {
-          calls.push(callee.name);
-        } else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-          calls.push(callee.property.name);
-        }
-      }
-    });
-    return [...new Set(calls)];
-  }
-
-  /**
-   * Extract variable/type references from AST path
-   */
-  private extractReferences(path: any): string[] {
-    const refs: string[] = [];
-    path.traverse({
-      Identifier: (idPath: any) => {
-        // Skip function parameters and declarations
-        if (idPath.parent.type !== 'FunctionDeclaration' && idPath.parent.type !== 'VariableDeclarator') {
-          refs.push(idPath.node.name);
-        }
-      }
-    });
-    return [...new Set(refs)];
-  }
-
-  /**
-   * Check if node is exported
-   */
-  private isExported(path: any): boolean {
-    let currentPath = path;
-    while (currentPath) {
-      if (currentPath.parent?.type === 'ExportNamedDeclaration' ||
-          currentPath.parent?.type === 'ExportDefaultDeclaration') {
-        return true;
-      }
-      currentPath = currentPath.parentPath;
-    }
-    return false;
-  }
-
-  /**
-   * Extract node content from source
-   */
-  private extractNodeContent(code: string, node: any): string {
-    if (node.loc) {
-      const lines = code.split('\n');
-      const startLine = node.loc.start.line - 1;
-      const endLine = node.loc.end.line - 1;
-      return lines.slice(startLine, endLine + 1).join('\n');
-    }
-    return '';
+    return { elements, imports };
   }
 
   /**
@@ -403,7 +373,81 @@ export class AnalysisEngine {
       }
     }
 
-    // Step 5: Build edges based on imports and calls
+    // Step 5: Build file-to-file import dependencies
+    for (const file of files) {
+      const fileNode = nodes.get(file.path);
+      if (!fileNode || !file.imports) continue;
+
+      for (const importInfo of file.imports) {
+        // Resolve the import to an actual file
+        const targetFile = this.resolveImportPath(importInfo.source, file.path, files);
+        if (targetFile && nodes.has(targetFile)) {
+          const targetFileNode = nodes.get(targetFile)!;
+          
+          // Create file-to-file import edge
+          const edgeExists = edges.some(e => 
+            e.from === file.path && e.to === targetFile && e.type === 'import'
+          );
+          
+          if (!edgeExists) {
+            edges.push({
+              from: file.path,
+              to: targetFile,
+              type: 'import',
+              location: { file: file.path, line: importInfo.line }
+            });
+            
+            // Track dependencies (this file depends on targetFile)
+            if (!fileNode.upstream.includes(targetFile)) {
+              fileNode.upstream.push(targetFile);
+            }
+            if (!targetFileNode.downstream.includes(file.path)) {
+              targetFileNode.downstream.push(file.path);
+            }
+          }
+
+          // Also create element-to-element dependencies for specific imports
+          for (const specifier of importInfo.specifiers) {
+            // Find the exported element in target file
+            const targetFileStructure = files.find(f => f.path === targetFile);
+            if (targetFileStructure) {
+              const targetElement = targetFileStructure.elements.find(
+                e => e.name === specifier && e.isExported
+              );
+              if (targetElement) {
+                const targetElementId = `${targetFile}:${specifier}`;
+                
+                // Link importing file's elements that use this specifier
+                for (const element of file.elements) {
+                  const fromId = `${file.path}:${element.name}`;
+                  const fromNode = nodes.get(fromId);
+                  
+                  // Check if this element references the imported specifier
+                  if (fromNode && (element.references.includes(specifier) || element.calls.includes(specifier))) {
+                    const elementEdgeExists = edges.some(e => 
+                      e.from === fromId && e.to === targetElementId && e.type === 'import'
+                    );
+                    
+                    if (!elementEdgeExists && nodes.has(targetElementId)) {
+                      edges.push({
+                        from: fromId,
+                        to: targetElementId,
+                        type: 'import',
+                        location: { file: file.path, line: element.line }
+                      });
+                      fromNode.upstream.push(targetElementId);
+                      nodes.get(targetElementId)!.downstream.push(fromId);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Step 6: Build edges based on function calls within same file
     for (const file of files) {
       for (const element of file.elements) {
         const fromId = `${file.path}:${element.name}`;
@@ -412,42 +456,25 @@ export class AnalysisEngine {
 
         // Process function calls
         for (const call of element.calls) {
-          // Find target in same file or imported files
+          // Find target in same file first
           const targetId = this.resolveReference(call, file.path, element.imports, files);
-          if (targetId && nodes.has(targetId)) {
-            edges.push({
-              from: fromId,
-              to: targetId,
-              type: 'call',
-              location: { file: file.path, line: element.line }
-            });
-            fromNode.upstream.push(targetId);
-            nodes.get(targetId)!.downstream.push(fromId);
-          }
-        }
-
-        // Process imports
-        for (const imp of element.imports) {
-          // Create import edge
-          const targetFile = this.resolveImportPath(imp, file.path, files);
-          if (targetFile) {
-            // Link to file's exports
-            const targetFileStructure = files.find(f => f.path === targetFile);
-            if (targetFileStructure) {
-              for (const targetElement of targetFileStructure.elements) {
-                if (targetElement.isExported) {
-                  const targetId = `${targetFile}:${targetElement.name}`;
-                  if (nodes.has(targetId)) {
-                    edges.push({
-                      from: fromId,
-                      to: targetId,
-                      type: 'import',
-                      location: { file: file.path, line: element.line }
-                    });
-                    fromNode.upstream.push(targetId);
-                    nodes.get(targetId)!.downstream.push(fromId);
-                  }
-                }
+          if (targetId && nodes.has(targetId) && targetId !== fromId) {
+            const callEdgeExists = edges.some(e => 
+              e.from === fromId && e.to === targetId && e.type === 'call'
+            );
+            
+            if (!callEdgeExists) {
+              edges.push({
+                from: fromId,
+                to: targetId,
+                type: 'call',
+                location: { file: file.path, line: element.line }
+              });
+              if (!fromNode.upstream.includes(targetId)) {
+                fromNode.upstream.push(targetId);
+              }
+              if (!nodes.get(targetId)!.downstream.includes(fromId)) {
+                nodes.get(targetId)!.downstream.push(fromId);
               }
             }
           }

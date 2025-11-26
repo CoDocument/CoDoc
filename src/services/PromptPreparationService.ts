@@ -1,10 +1,13 @@
 /**
  * PromptPreparationService - Prepares comprehensive prompts for OpenCode generation
  * Handles CoDoc structure, changes, history, and context files
+ * 
+ * Uses StructuralDiffEngine and codocParser for change analysis
  */
 
-import { SchemaNode } from '../types.js';
-import { CodeChangeAnalyzer, CodeChange } from './CodeChangeAnalyzer.js';
+import { SchemaNode, StructuralDiff } from '../types.js';
+import { structuralDiffEngine } from './StructuralDiffEngine.js';
+import { codocParser } from '../parser/codocParser.js';
 
 export interface PromptContext {
   currentCoDocContent: string;
@@ -13,27 +16,27 @@ export interface PromptContext {
   workspaceRoot: string;
 }
 
+/**
+ * Simplified change representation for prompt building
+ */
+export interface PromptChange {
+  type: 'add' | 'remove' | 'modify' | 'rename';
+  element: SchemaNode;
+  fromName?: string;
+  toName?: string;
+}
+
 export class PromptPreparationService {
-  private codeChangeAnalyzer: CodeChangeAnalyzer;
-
-  constructor() {
-    this.codeChangeAnalyzer = new CodeChangeAnalyzer();
-  }
-
   /**
    * Prepare complete prompt for OpenCode generation
    */
   async preparePrompt(context: PromptContext): Promise<string> {
-    const { currentCoDocContent, previousCoDocContent, lastGenerationSummary, workspaceRoot } = context;
+    const { currentCoDocContent, previousCoDocContent, lastGenerationSummary } = context;
 
-    // Analyze changes if we have previous content
-    let changes: CodeChange[] = [];
+    // Analyze changes using StructuralDiffEngine if we have previous content
+    let changes: PromptChange[] = [];
     if (previousCoDocContent) {
-      changes = await this.codeChangeAnalyzer.analyzeChanges(
-        previousCoDocContent,
-        currentCoDocContent,
-        workspaceRoot
-      );
+      changes = this.analyzeChanges(previousCoDocContent, currentCoDocContent);
     }
 
     // Build comprehensive prompt
@@ -59,6 +62,48 @@ ${implementationGuidelines}
 - End your response with a ## SUMMARY section describing key changes made`;
 
     return fullPrompt;
+  }
+
+  /**
+   * Analyze changes between old and new CoDoc content using StructuralDiffEngine
+   */
+  private analyzeChanges(oldContent: string, newContent: string): PromptChange[] {
+    const changes: PromptChange[] = [];
+
+    try {
+      // Parse both contents using codocParser
+      const oldParseResult = codocParser.parse(oldContent);
+      const newParseResult = codocParser.parse(newContent);
+
+      // Use StructuralDiffEngine to compare
+      const diff = structuralDiffEngine.compare(oldParseResult.nodes, newParseResult.nodes);
+
+      // Convert StructuralDiff to PromptChange[]
+      for (const added of diff.added) {
+        changes.push({ type: 'add', element: added });
+      }
+
+      for (const removed of diff.removed) {
+        changes.push({ type: 'remove', element: removed });
+      }
+
+      for (const modified of diff.modified) {
+        changes.push({ type: 'modify', element: modified });
+      }
+
+      for (const renamed of diff.renamed) {
+        changes.push({
+          type: 'rename',
+          element: renamed.to,
+          fromName: renamed.from.name,
+          toName: renamed.to.name
+        });
+      }
+    } catch (error) {
+      console.error('Failed to analyze changes:', error);
+    }
+
+    return changes;
   }
 
   /**
@@ -124,7 +169,7 @@ ${currentCoDocContent}
    * Build changes section highlighting diffs from previous version
    */
   private buildChangesSection(
-    changes: CodeChange[],
+    changes: PromptChange[],
     previousCoDocContent?: string,
     lastGenerationSummary?: string
   ): string {
@@ -135,7 +180,11 @@ This is the first generation for this CoDoc. Implement the complete structure fr
     }
 
     const changeDescriptions = changes.map(change => {
-      const icon = change.type === 'add' ? '➕' : change.type === 'remove' ? '➖' : '🔄';
+      let icon = '🔄';
+      if (change.type === 'add') icon = '➕';
+      else if (change.type === 'remove') icon = '➖';
+      else if (change.type === 'rename') icon = '→';
+      
       const typeLabel = change.type.toUpperCase().padEnd(8);
       const elementType = change.element.type.padEnd(10);
       const elementName = change.element.name;
@@ -143,9 +192,9 @@ This is the first generation for this CoDoc. Implement the complete structure fr
       
       let description = `${icon} ${typeLabel} | ${elementType} | ${elementName}${location}`;
       
-      if (change.content) {
-        const preview = change.content.substring(0, 80).replace(/\n/g, ' ');
-        description += `\n     Content: ${preview}${change.content.length > 80 ? '...' : ''}`;
+      // Add rename details if applicable
+      if (change.type === 'rename' && change.fromName && change.toName) {
+        description += `\n     Renamed: ${change.fromName} → ${change.toName}`;
       }
       
       return description;
@@ -154,6 +203,7 @@ This is the first generation for this CoDoc. Implement the complete structure fr
     const addedCount = changes.filter(c => c.type === 'add').length;
     const removedCount = changes.filter(c => c.type === 'remove').length;
     const modifiedCount = changes.filter(c => c.type === 'modify').length;
+    const renamedCount = changes.filter(c => c.type === 'rename').length;
 
     const summarySection = lastGenerationSummary 
       ? `\n\n**Last Generation Summary**:\n${lastGenerationSummary}\n` 
@@ -169,6 +219,7 @@ This is an update to an existing CoDoc. The user has made **${changes.length} ch
 - ${addedCount} additions ➕
 - ${modifiedCount} modifications 🔄
 - ${removedCount} removals ➖
+- ${renamedCount} renames →
 
 ### Detailed Changes:
 

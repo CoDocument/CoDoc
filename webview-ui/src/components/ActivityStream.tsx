@@ -75,6 +75,7 @@ function getActivityColor(type: ActivityItem['type']): string {
  * Format a concise message
  */
 function formatMessage(item: ActivityItem): string {
+  console.log('Formatting message for activity item:', item);
   switch (item.type) {
     case 'thinking':
       return item.message.replace('Thinking: ', '');

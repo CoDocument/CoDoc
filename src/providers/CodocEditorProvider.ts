@@ -7,12 +7,10 @@ import { AnalysisEngine } from '../services/AnalysisEngine.js';
 import { structuralDiffEngine } from '../services/StructuralDiffEngine.js';
 import { openCodeSDKService } from '../services/agent/OpenCodeSDKService.js';
 import { impactAnalysisService } from '../services/ImpactAnalysisService.js';
-import { codeChangeAnalyzer } from '../services/CodeChangeAnalyzer.js';
 import { promptPreparationService } from '../services/PromptPreparationService.js';
 import { MockGenerationService } from '../services/agent/MockGenerationService.js';
 import { FileSystemSyncService } from '../services/FileSystemSyncService.js';
 import { PreviewService } from '../services/PreviewService.js';
-// import { FileChangeTracker } from '../services/FileChangeTracker.js';
 import { SchemaNode, CodebaseSnapshot, EditorState } from '../types.js';
 import { codocParser } from '../parser/codocParser.js';
 import { ActivityEvent, GutterDecoration, ActivityEventCallbacks } from '../services/agent/ActivityEventTypes.js';
@@ -25,22 +23,18 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
   private analysisEngine: AnalysisEngine | null = null;
   private fileSystemSyncService: FileSystemSyncService | null = null;
   private previewService: PreviewService | null = null;
-  // private fileChangeTracker: FileChangeTracker | null = null;
   private previousContent: string = '';
   private previousSchema: SchemaNode[] = [];
 
-  // Store CoDoc snapshot BEFORE generation for AI change detection
+
   private preGenerationCoDoc: SchemaNode[] = [];
   private preGenerationSnapshot: CodebaseSnapshot | null = null;
-  
-  // Track generation state
+
   private isGenerating: boolean = false;
 
-  // Debounce timer for CoDoc changes
   private syncDebounceTimer: NodeJS.Timeout | null = null;
   private readonly SYNC_DEBOUNCE_MS = 1500;
   
-  // Flag to prevent feedback loop when making programmatic updates
   private isUpdatingProgrammatically = false;
 
   constructor(context: vscode.ExtensionContext) {
@@ -161,10 +155,8 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       const workspaceRoot = workspaceFolder.uri.fsPath;
       this.fileSystemSyncService = new FileSystemSyncService(workspaceRoot);
       this.previewService = new PreviewService(workspaceRoot);
-      // this.fileChangeTracker = new FileChangeTracker(workspaceRoot);
     }
 
-    // Setup activity event callbacks for the webview
     this.setupActivityCallbacks(webviewPanel);
 
     // Send initial content
@@ -193,7 +185,6 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         break;
 
       case 'generateCode':
-        // Clear previous feedback decorations before generating (assumes user is happy with them)
         if (this.currentPanel) {
           this.currentPanel.webview.postMessage({
             type: 'clearFeedbackDecorations'
@@ -222,7 +213,6 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         break;
 
       case 'rejectFeedbackChange':
-        // Handle different rejection types
         await this.handleFeedbackRejection(
           message.changeId, 
           message.changeType, 
@@ -290,7 +280,6 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       const snapshot = await this.analysisEngine.scanCodebase();
       const dependencyGraph = snapshot.dependencyGraph;
 
-      // Generate feedforward suggestions
       impactAnalysisService.generateFeedforwardSuggestions(
         content,
         cursorLine,
@@ -300,7 +289,6 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         apiKey,
         undefined, // rejectedPatterns
         (suggestions) => {
-          // Send suggestions to webview
           if (this.currentPanel) {
             this.currentPanel.webview.postMessage({
               type: 'feedforwardSuggestions',
@@ -615,15 +603,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
 ${prompt}`;
       }
-
       this.isGenerating = true;
-
-      // Start tracking file changes
-      // if (this.fileChangeTracker) {
-      //   this.fileChangeTracker.startTracking();
-      // }
-
-      // Show output channel
       openCodeSDKService.showOutput();
 
       vscode.window.withProgress({
@@ -655,14 +635,9 @@ ${prompt}`;
               await this.handleGenerationComplete(workDir, currentContent, progress);
             } else if (progressUpdate.stage === 'error') {
               this.isGenerating = false;
-              // if (this.fileChangeTracker) {
-              //   this.fileChangeTracker.stopTracking();
-              // }
             }
           },
-          // File change callback - incremental updates
           async (fileChange) => {
-            // Trigger incremental CoDoc update when files change
             await this.handleIncrementalUpdate(fileChange.path);
           }
         );
@@ -670,16 +645,10 @@ ${prompt}`;
         if (!result.success) {
           vscode.window.showErrorMessage(`Generation failed: ${result.error}`);
           this.isGenerating = false;
-          // if (this.fileChangeTracker) {
-          //   this.fileChangeTracker.stopTracking();
-          // }
         }
       });
     } catch (error) {
       this.isGenerating = false;
-      // if (this.fileChangeTracker) {
-      //   this.fileChangeTracker.stopTracking();
-      // }
       vscode.window.showErrorMessage(`Generation failed: ${error}`);
     }
   }
@@ -747,13 +716,7 @@ ${prompt}`;
     try {
       progress.report({ message: 'Finalizing changes...' });
 
-      // Stop tracking file changes
-      // const fileChanges = this.fileChangeTracker?.stopTracking() || [];
-
-      // Wait for file system to settle
       await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // STEP 2: Final rescan and CoDoc reconstruction
       if (!this.analysisEngine) {
         return;
       }
@@ -837,52 +800,6 @@ ${prompt}`;
     }
   }
 
-  // /**
-  //  * Rescan codebase and update CoDoc document with new structure
-  //  */
-  // private async rescanAndUpdateCoDoc(): Promise<void> {
-  //   if (!this.currentDocument || !vscode.workspace.workspaceFolders) {
-  //     return;
-  //   }
-
-  //   const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-
-  //   try {
-  //     // Re-initialize analysis engine
-  //     if (!this.analysisEngine) {
-  //       this.analysisEngine = new AnalysisEngine(workspaceRoot);
-  //     }
-
-  //     // Scan codebase
-  //     const snapshot = await this.analysisEngine.scanCodebase();
-  //     const newSchema = this.analysisEngine.constructCodoc(snapshot);
-
-  //     // Generate new CoDoc content
-  //     const projectName = this.currentDocument.uri.fsPath.split('/').pop()?.replace('.codoc', '') || 'project';
-  //     const newContent = this.generateCodocContent(projectName, newSchema);
-
-  //     // Update document
-  //     const edit = new vscode.WorkspaceEdit();
-  //     edit.replace(
-  //       this.currentDocument.uri,
-  //       new vscode.Range(0, 0, this.currentDocument.lineCount, 0),
-  //       newContent
-  //     );
-  //     await vscode.workspace.applyEdit(edit);
-
-  //     // Notify webview
-  //     if (this.currentPanel) {
-  //       this.currentPanel.webview.postMessage({
-  //         type: 'contentUpdate',
-  //         content: newContent
-  //       });
-  //     }
-  //   } catch (error) {
-  //     console.error('Failed to rescan and update CoDoc:', error);
-  //     throw error;
-  //   }
-  // }
-
   private async analyzeImpact(editedNode: SchemaNode): Promise<void> {
     if (!this.editorState?.dependencyGraph) return;
 
@@ -934,45 +851,6 @@ ${prompt}`;
     );
   }
 
-  // private findCodeElementPosition(
-  //   text: string,
-  //   elementName: string,
-  //   elementType: string
-  // ): { line: number; character: number } | null {
-  //   const lines = text.split('\n');
-
-  //   for (let i = 0; i < lines.length; i++) {
-  //     const line = lines[i];
-
-  //     if (elementType === 'function') {
-  //       const functionPatterns = [
-  //         new RegExp(`function\\s+${elementName}\\s*\\(`),
-  //         new RegExp(`const\\s+${elementName}\\s*=.*=>`),
-  //         new RegExp(`${elementName}\\s*:\\s*function`),
-  //       ];
-
-  //       for (const pattern of functionPatterns) {
-  //         if (pattern.test(line)) {
-  //           return { line: i, character: 0 };
-  //         }
-  //       }
-  //     } else if (elementType === 'component') {
-  //       const componentPatterns = [
-  //         new RegExp(`(function|const)\\s+${elementName}`),
-  //         new RegExp(`class\\s+${elementName}\\s+extends`),
-  //       ];
-
-  //       for (const pattern of componentPatterns) {
-  //         if (pattern.test(line)) {
-  //           return { line: i, character: 0 };
-  //         }
-  //       }
-  //     }
-  //   }
-
-  //   return null;
-  // }
-
   /**
    * Debounced wrapper for handleCoDocChanges
    */
@@ -1019,46 +897,12 @@ ${prompt}`;
         dependencyGraph
       );
 
-      // Note: Do NOT call syncCodebase() here as it causes cursor jumping
-      // during manual edits. syncCodebase() is only for:
-      // 1. Initial document load
-      // 2. After AI code generation
-      // 3. Explicit user "Sync Codebase" button click
-
       if (!syncResult.success) {
         vscode.window.showWarningMessage(
           `Some changes could not be synced: ${syncResult.errors.join(', ')}`
         );
       }
 
-      // Show revert notification if there are significant changes
-      // if (syncResult.operations.length > 0 && syncResult.revertToken) {
-      //   const hasDestructiveOps = syncResult.operations.some(op =>
-      //     op.type === 'delete'
-      //   );
-
-      //   if (hasDestructiveOps) {
-      //     await this.fileSystemSyncService.showRevertNotification(
-      //       syncResult.operations,
-      //       syncResult.revertToken
-      //     );
-      //   }
-
-      //   // Highlight affected nodes in the editor
-      //   const affectedNodeIds = syncResult.operations
-      //     .flatMap(op => op.affectedNodes || [])
-      //     .filter((id, index, self) => self.indexOf(id) === index);
-
-      //   if (affectedNodeIds.length > 0) {
-      //     this.currentPanel.webview.postMessage({
-      //       type: 'highlightAffectedNodes',
-      //       nodeIds: affectedNodeIds,
-      //       duration: 1500
-      //     });
-      //   }
-      // }
-
-      // Update previous schema
       this.previousSchema = newSchema;
     } catch (error) {
       console.error('Failed to handle CoDoc changes:', error);
