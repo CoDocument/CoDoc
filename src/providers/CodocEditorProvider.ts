@@ -34,7 +34,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
   private syncDebounceTimer: NodeJS.Timeout | null = null;
   private readonly SYNC_DEBOUNCE_MS = 1500;
-  
+
   private isUpdatingProgrammatically = false;
 
   constructor(context: vscode.ExtensionContext) {
@@ -193,20 +193,6 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         await this.generateCode(message.prompt, message.contextFiles);
         break;
 
-      case 'mockGenerateCode':
-        // Mock generation for testing feedback decorations
-        if (this.currentPanel) {
-          this.currentPanel.webview.postMessage({
-            type: 'clearFeedbackDecorations'
-          });
-        }
-        await this.mockGenerateCode();
-        break;
-
-      case 'analyzeImpact':
-        await this.analyzeImpact(message.editedNode);
-        break;
-
       case 'acceptFeedbackChange':
         // Change is already in the document, just clear the decoration
         await this.clearFeedbackDecoration(message.changeId);
@@ -214,8 +200,8 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
       case 'rejectFeedbackChange':
         await this.handleFeedbackRejection(
-          message.changeId, 
-          message.changeType, 
+          message.changeId,
+          message.changeType,
           message.content
         );
         break;
@@ -244,6 +230,16 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       case 'cancelFeedforward':
         impactAnalysisService.cancel();
         break;
+
+      // for testing
+      case 'mockGenerateCode':
+        if (this.currentPanel) {
+          this.currentPanel.webview.postMessage({
+            type: 'clearFeedbackDecorations'
+          });
+        }
+        await this.mockGenerateCode();
+        break;
     }
   }
 
@@ -256,7 +252,10 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
     cursorColumn: number,
     parsedSchema: any[]
   ): Promise<void> {
+    console.log('[CodocEditorProvider] generateFeedforward called, line:', cursorLine, 'col:', cursorColumn, 'schema nodes:', parsedSchema?.length || 0);
+    
     if (!vscode.workspace.workspaceFolders) {
+      console.log('[CodocEditorProvider] No workspace folder');
       return;
     }
 
@@ -265,6 +264,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
     try {
       // Initialize analysis engine if not already done
       if (!this.analysisEngine) {
+        console.log('[CodocEditorProvider] Initializing analysis engine...');
         this.analysisEngine = new AnalysisEngine(workspaceRoot);
         await this.analysisEngine.scanCodebase();
       }
@@ -272,14 +272,16 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       // Get OpenAI API key from configuration
       const apiKey = vscode.workspace.getConfiguration('codoc').get<string>('openaiApiKey');
       if (!apiKey) {
-        console.warn('OpenAI API key not configured');
+        console.warn('[CodocEditorProvider] OpenAI API key not configured');
         return;
       }
 
       // Get dependency graph from analysis engine
+      console.log('[CodocEditorProvider] Scanning codebase for dependency graph...');
       const snapshot = await this.analysisEngine.scanCodebase();
       const dependencyGraph = snapshot.dependencyGraph;
 
+      console.log('[CodocEditorProvider] Calling impactAnalysisService.generateFeedforwardSuggestions...');
       impactAnalysisService.generateFeedforwardSuggestions(
         content,
         cursorLine,
@@ -289,6 +291,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         apiKey,
         undefined, // rejectedPatterns
         (suggestions) => {
+          console.log('[CodocEditorProvider] Received', suggestions?.length || 0, 'feedforward suggestions');
           if (this.currentPanel) {
             this.currentPanel.webview.postMessage({
               type: 'feedforwardSuggestions',
@@ -357,8 +360,11 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         this.analysisEngine = new AnalysisEngine(workspaceRoot);
         const snapshot = await this.analysisEngine.scanCodebase();
 
-        // Construct CoDoc from snapshot
-        const newSchema = this.analysisEngine.constructCodoc(snapshot);
+        // Extract existing comments from current schema
+        const existingComments = this.extractCommentsFromSchema(this.previousSchema);
+
+        // Construct CoDoc from snapshot, preserving comments
+        const newSchema = this.analysisEngine.constructCodoc(snapshot, existingComments);
         const codocContent = this.generateCodocContent('project', newSchema);
 
         // Update document content
@@ -377,21 +383,23 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
           }
         }
 
-        // Update editor state
-        this.editorState = {
-          content: codocContent,
-          parsedSchema: newSchema,
-          dependencyGraph: snapshot.dependencyGraph,
-          focusedNodeId: null,
-          generationHistory: this.editorState?.generationHistory || []
-        };
+      // Update editor state
+      this.editorState = {
+        content: codocContent,
+        parsedSchema: newSchema,
+        dependencyGraph: snapshot.dependencyGraph,
+        focusedNodeId: null,
+        generationHistory: this.editorState?.generationHistory || []
+      };
 
         // Send to webview with dependency graph
         if (this.currentPanel) {
+          // Remove circular parent references before sending
+          const cleanSchema = this.removeCircularReferences(newSchema);
           this.currentPanel.webview.postMessage({
             type: 'codebaseScanned',
             snapshot,
-            parsedSchema: newSchema
+            parsedSchema: cleanSchema
           });
 
           // Find new line number for cursor node if it still exists
@@ -529,6 +537,14 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
           break;
         case 'note':
           line = `${indentStr}# ${node.content}\n`;
+          break;
+        case 'comment':
+          // Render comment as # followed by the comment text
+          line = `${indentStr}# ${node.content || node.name}\n`;
+          break;
+        case 'freeform':
+          // Render freeform nodes as-is
+          line = `${indentStr}${node.originalText || node.name}\n`;
           break;
       }
 
@@ -672,7 +688,7 @@ ${prompt}`;
 
       // Update CoDoc content in editor
       const codocContent = this.generateCodocContent('project', newSchema);
-      
+
       if (this.currentDocument) {
         this.isUpdatingProgrammatically = true;
         try {
@@ -732,7 +748,7 @@ ${prompt}`;
 
       // Update CoDoc content
       const codocContent = this.generateCodocContent('project', postGenerationCoDoc);
-      
+
       if (this.currentDocument) {
         this.isUpdatingProgrammatically = true;
         try {
@@ -771,10 +787,11 @@ ${prompt}`;
           preserveCursor: false
         });
 
+        const cleanSchema = this.removeCircularReferences(postGenerationCoDoc);
         this.currentPanel.webview.postMessage({
           type: 'codebaseScanned',
           snapshot: postGenerationSnapshot,
-          parsedSchema: postGenerationCoDoc
+          parsedSchema: cleanSchema
         });
 
         this.currentPanel.webview.postMessage({
@@ -800,56 +817,6 @@ ${prompt}`;
     }
   }
 
-  private async analyzeImpact(editedNode: SchemaNode): Promise<void> {
-    if (!this.editorState?.dependencyGraph) return;
-
-    const config = vscode.workspace.getConfiguration('codoc');
-    const apiKey = config.get<string>('openaiApiKey');
-
-    if (!apiKey || apiKey.trim() === '') {
-      const action = await vscode.window.showWarningMessage(
-        'OpenAI API key not configured. Impact analysis is disabled. Would you like to configure it now?',
-        'Configure',
-        'Cancel'
-      );
-
-      if (action === 'Configure') {
-        const inputKey = await vscode.window.showInputBox({
-          prompt: 'Enter your OpenAI API Key',
-          password: true,
-          placeHolder: 'sk-...'
-        });
-
-        if (inputKey && inputKey.trim() !== '') {
-          await config.update('openaiApiKey', inputKey, vscode.ConfigurationTarget.Global);
-          vscode.window.showInformationMessage('API key saved. Impact analysis is now enabled.');
-        } else {
-          return;
-        }
-      } else {
-        return;
-      }
-    }
-
-    const lastSummary = this.editorState.generationHistory.length > 0
-      ? this.editorState.generationHistory[this.editorState.generationHistory.length - 1].summary
-      : '';
-
-    impactAnalysisService.analyzeEditImpact(
-      editedNode,
-      this.editorState.dependencyGraph,
-      lastSummary,
-      config.get<string>('openaiApiKey')!,
-      (suggestions) => {
-        if (this.currentPanel) {
-          this.currentPanel.webview.postMessage({
-            type: 'suggestions',
-            suggestions
-          });
-        }
-      }
-    );
-  }
 
   /**
    * Debounced wrapper for handleCoDocChanges
@@ -891,21 +858,25 @@ ${prompt}`;
       const dependencyGraph = snapshot.dependencyGraph;
       console.log('<<diff', diff);
 
-      const syncResult = await this.fileSystemSyncService.syncChanges(
-        diff,
-        newSchema,
-        dependencyGraph
-      );
-
-      if (!syncResult.success) {
-        vscode.window.showWarningMessage(
-          `Some changes could not be synced: ${syncResult.errors.join(', ')}`
+      // Only sync if there are actual changes
+      if (diff.added.length > 0 || diff.removed.length > 0 || diff.modified.length > 0 || diff.renamed.length > 0) {
+        const syncResult = await this.fileSystemSyncService.syncChanges(
+          diff,
+          newSchema,
+          dependencyGraph
         );
+
+        if (!syncResult.success) {
+          vscode.window.showWarningMessage(
+            `Some changes could not be synced: ${syncResult.errors.join(', ')}`
+          );
+        }
       }
 
       this.previousSchema = newSchema;
     } catch (error) {
       console.error('Failed to handle CoDoc changes:', error);
+      // Don't show error to user for now as this might be triggered during save operations
     }
   }
 
@@ -969,6 +940,45 @@ ${prompt}`;
   }
 
   /**
+   * Remove circular parent references from schema tree before sending to webview
+   * Creates a clean deep copy without parent references
+   */
+  private removeCircularReferences(nodes: SchemaNode[]): SchemaNode[] {
+    return nodes.map(node => {
+      const { parent, ...cleanNode } = node;
+      if (cleanNode.children) {
+        cleanNode.children = this.removeCircularReferences(cleanNode.children);
+      }
+      return cleanNode as SchemaNode;
+    });
+  }
+
+  /**
+   * Extract all comment nodes from schema tree
+   * Used to preserve comments during codebase sync
+   */
+  private extractCommentsFromSchema(nodes: SchemaNode[]): SchemaNode[] {
+    const comments: SchemaNode[] = [];
+    
+    const traverse = (node: SchemaNode) => {
+      if (node.isComment) {
+        comments.push(node);
+      }
+      if (node.children) {
+        for (const child of node.children) {
+          traverse(child);
+        }
+      }
+    };
+    
+    for (const node of nodes) {
+      traverse(node);
+    }
+    
+    return comments;
+  }
+
+  /**
    * Clear a specific feedback decoration (change accepted)
    */
   private async clearFeedbackDecoration(changeId: string): Promise<void> {
@@ -987,8 +997,8 @@ ${prompt}`;
    * For modifications: need to revert the code change
    */
   private async handleFeedbackRejection(
-    changeId: string, 
-    changeType: string, 
+    changeId: string,
+    changeType: string,
     content?: string
   ): Promise<void> {
     if (!this.currentDocument) {
@@ -998,7 +1008,7 @@ ${prompt}`;
     try {
       // The frontend already modified the CoDoc content
       // Now we need to sync these changes with the file system
-      
+
       // Debounce the sync to allow multiple rejections to batch
       if (this.syncDebounceTimer) {
         clearTimeout(this.syncDebounceTimer);

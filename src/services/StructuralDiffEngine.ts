@@ -126,12 +126,17 @@ export class StructuralDiffEngine {
 
   /**
    * Flatten schema nodes for easier processing
+   * Skips freeform nodes and comments as they don't participate in structural diff
    */
   private flattenNodes(nodes: SchemaNode[]): SchemaNode[] {
     const flat: SchemaNode[] = [];
 
     const traverse = (items: SchemaNode[]) => {
       for (const node of items) {
+        // Skip freeform/unrecognized nodes and comments
+        if (node.type === 'freeform' || node.isFreeform || node.isUnrecognized || node.isComment) {
+          continue;
+        }
         flat.push(node);
         if (node.children && node.children.length > 0) {
           traverse(node.children);
@@ -288,6 +293,9 @@ export class StructuralDiffEngine {
       case 'note':
         prefix = '# ';
         break;
+      case 'freeform':
+        // Freeform nodes retain their original text
+        return `${indent}${node.originalText || node.name || '???'}`;
     }
 
     return `${indent}${prefix}${node.name}`;
@@ -592,6 +600,9 @@ export class StructuralDiffEngine {
         return 'directory';
       case 'reference':
         return 'reference';
+      case 'freeform':
+        // Freeform maps to variable as a fallback
+        return 'variable';
       default:
         return 'variable';
     }
@@ -619,6 +630,9 @@ export class StructuralDiffEngine {
         return node.name;
       case 'note':
         return `# ${node.content || node.name}`;
+      case 'freeform':
+        // Return original text for freeform nodes
+        return node.originalText || node.name || '';
     }
     
     return `${prefix}${node.name}`;

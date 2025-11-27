@@ -1,6 +1,14 @@
+export interface SchemaDiagnostic {
+  severity: 'error' | 'warning' | 'info' | 'hint';
+  message: string;
+  line?: number;
+  column?: number;
+  source?: string;
+}
+
 export interface SchemaNode {
   id: string;
-  type: 'directory' | 'file' | 'function' | 'component' | 'variable' | 'reference' | 'note';
+  type: 'directory' | 'file' | 'function' | 'component' | 'variable' | 'reference' | 'note' | 'freeform' | 'comment';
   name: string;
   path: string;
   extension?: string;
@@ -13,6 +21,12 @@ export interface SchemaNode {
   dependencies: string[];
   dependents: string[];
   contentHash: string;
+  // Freeform/unrecognized content fields
+  isFreeform?: boolean;
+  isComment?: boolean;
+  isUnrecognized?: boolean;
+  originalText?: string;
+  diagnostics?: SchemaDiagnostic[];
 }
 
 export interface SuggestedChange {
@@ -27,7 +41,7 @@ export interface FeedforwardSuggestion {
   text: string;
   insertLine: number;
   indentLevel: number;
-  type: 'component' | 'function' | 'variable' | 'file' | 'directory' | 'reference';
+  type: 'component' | 'function' | 'variable' | 'file' | 'directory' | 'reference' | 'freeform';
   fullPath: string;
   parent?: string;
   groupId?: string;

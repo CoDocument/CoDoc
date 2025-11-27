@@ -118,16 +118,16 @@ class FeedforwardLineWidget extends WidgetType {
       container.style.display = 'none';
     }
     
+    // Subtle ghost text styling - no background, no borders
     if (this.isAccepted) {
-      container.style.backgroundColor = 'rgba(34, 197, 94, 0.2)';
-      container.style.borderLeft = '3px solid rgba(34, 197, 94, 0.6)';
-      container.style.opacity = '0.7';
+      // Slightly less opaque for accepted
+      container.style.opacity = '0.5';
     } else if (this.isHighlighted) {
-      container.style.backgroundColor = 'rgba(14, 165, 233, 0.25)';
-      container.style.borderLeft = '3px solid rgba(14, 165, 233, 0.8)';
+      // Slightly more visible when highlighted
+      container.style.opacity = '0.5';
     } else {
-      container.style.backgroundColor = 'rgba(156, 163, 175, 0.15)';
-      container.style.borderLeft = '3px solid rgba(156, 163, 175, 0.4)';
+      // Very subtle by default
+      container.style.opacity = '0.35';
     }
 
     const indent = '  '.repeat(Math.max(0, this.suggestion.indentLevel));
@@ -457,27 +457,27 @@ const feedforwardPlugin = ViewPlugin.fromClass(
 );
 
 /**
- * Theme for feedforward suggestions
+ * Theme for feedforward suggestions - subtle ghost text
  */
 const feedforwardTheme = EditorView.baseTheme({
   ".cm-feedforwardSuggestion": {
-    margin: "2px 0",
-    padding: "4px 8px",
-    borderRadius: "3px",
+    margin: "0",
+    padding: "0",
     fontFamily: "inherit",
-    fontSize: "0.95em",
-    lineHeight: "1.3",
-    color: "inherit",
+    fontSize: "inherit",
+    lineHeight: "inherit",
+    color: "#6b7280", // Gray-500
     position: "relative",
-    transition: "all 0.2s ease"
+    fontStyle: "italic"
   },
   ".cm-feedforwardSuggestionCode": {
     margin: "0",
+    padding: "0",
     whiteSpace: "pre",
     fontFamily: "inherit"
   },
   "&dark .cm-feedforwardSuggestion": {
-    color: "rgba(209, 213, 219, 0.9)"
+    color: "#9ca3af" // Gray-400 for dark mode
   }
 });
 

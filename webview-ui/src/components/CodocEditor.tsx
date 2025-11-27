@@ -13,9 +13,9 @@
  *    - feedbackDecorationExtension receives changes and decorates add/modify/remove
  * 
  * 2. ImpactAnalysisService → feedforwardService
- *    - ImpactAnalysisService.analyzeEditImpact() uses OpenAI to suggest changes
+ *    - ImpactAnalysisService.generateFeedforwardSuggestions()
  *    - Based on dependency graph and edited nodes
- *    - CodocEditorProvider.analyzeImpact() sends 'suggestions' message
+ *    - CodocEditorProvider.generateFeedforward() sends 'suggestions' message
  *    - feedforwardService receives SuggestedChange[] and shows inline suggestions
  * 
  * 3. Lexer → codocSyntaxHighlighting
@@ -55,6 +55,11 @@ import {
   findLineForElement,
   GutterActivityDecoration 
 } from '../lib/editor/activityGutterExtension';
+import { 
+  createStyledCodocLinter, 
+  buildDiagnosticsFromSchema, 
+  setCodocDiagnostics 
+} from '../lib/editor/codocLintExtension';
 import { ActivityStream, ActivityItem } from './ActivityStream';
 import { SchemaNode } from '../types';
 
@@ -67,14 +72,14 @@ declare const acquireVsCodeApi: () => {
 
 const vscode = acquireVsCodeApi();
 
-function detectSuggestionType(text: string): FeedforwardSuggestion['type'] {
-  if (text.startsWith('/')) return 'directory';
-  if (text.startsWith('%')) return 'component';
-  if (text.startsWith('$')) return 'function';
-  if (text.startsWith('@')) return 'reference';
-  if (text.includes('.')) return 'file';
-  return 'variable';
-}
+// function detectSuggestionType(text: string): FeedforwardSuggestion['type'] {
+//   if (text.startsWith('/')) return 'directory';
+//   if (text.startsWith('%')) return 'component';
+//   if (text.startsWith('$')) return 'function';
+//   if (text.startsWith('@')) return 'reference';
+//   if (text.includes('.')) return 'file';
+//   return 'variable';
+// }
 
 export const CodocEditor: React.FC = () => {
   const [content, setContent] = useState('');
@@ -87,29 +92,41 @@ export const CodocEditor: React.FC = () => {
   const savedCursorPosRef = useRef<number | null>(null);
   const lastPreviewedLineRef = useRef<number>(-1);
   const previewDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isAltKeyPressedRef = useRef<boolean>(false);
+  const lastCursorPositionRef = useRef<{ line: number; column: number } | null>(null);
+  const previousContentRef = useRef<string>(''); // Track previous content for diff check
 
   // Get EditorView instance from the ref
   const getEditorView = (): EditorView | null => {
     return editorRef.current?.view ?? null;
   };
 
-  // Request feedforward suggestions with debounce
-  const requestFeedforward = useCallback((content: string) => {
+  // Request feedforward suggestions - triggered only when caret is stable for 1.5s
+  const requestFeedforward = useCallback((cursorLine: number, cursorColumn: number) => {
+    console.log('[CodocEditor] requestFeedforward called, line:', cursorLine, 'col:', cursorColumn);
     // Clear existing timeout
     if (feedforwardTimeoutRef.current) {
       clearTimeout(feedforwardTimeoutRef.current);
     }
 
+    // Only trigger if NOT navigating with Alt key
+    if (isAltKeyPressedRef.current) {
+      console.log('[CodocEditor] Alt key pressed, skipping feedforward');
+      return;
+    }
+
     feedforwardTimeoutRef.current = setTimeout(() => {
+      console.log('[CodocEditor] Feedforward timer fired, sending request...');
+      console.log('[CodocEditor] Schema nodes:', parsedSchema?.length || 0);
       vscode.postMessage({
         type: 'requestFeedforward',
         content,
-        cursorLine: lastPreviewedLineRef.current,
-        cursorColumn: 0,
+        cursorLine,
+        cursorColumn,
         parsedSchema
       });
-    }, 500);
-  }, [parsedSchema]);
+    }, 1500); // 1.5 seconds of stability
+  }, [content, parsedSchema]);
 
   /**
    * Handle rejection of an addition - remove the added element from CoDoc
@@ -246,12 +263,20 @@ export const CodocEditor: React.FC = () => {
               setDependencyGraphInView(view, message.snapshot.dependencyGraph);
             }
           }
+          // Update lint diagnostics for freeform/unrecognized nodes
+          if (message.parsedSchema) {
+            const view = getEditorView();
+            if (view) {
+              const diagnostics = buildDiagnosticsFromSchema(
+                message.parsedSchema,
+                view.state.doc.toString()
+              );
+              setCodocDiagnostics(diagnostics);
+            }
+          }
           break;
 
         case 'feedbackChanges':
-          // StructuralDiffEngine → feedbackDecorationExtension
-          // Backend structural analysis drives feedback decorations
-          // REPLACES all decorations with AI-generated changes after generation
           if (view && message.changes) {
             const changes = message.changes as CodocMergeChange[];
             showFeedbackDecorationsInView(view, changes);
@@ -259,7 +284,6 @@ export const CodocEditor: React.FC = () => {
           break;
 
         case 'showFeedbackDecorations':
-          // New: Show feedback decorations after code generation
           // REPLACES all decorations with new AI changes
           if (view && message.changes) {
             const changes = message.changes as CodocMergeChange[];
@@ -268,7 +292,6 @@ export const CodocEditor: React.FC = () => {
           break;
 
         case 'clearFeedbackDecorations':
-          // Clear all feedback decorations
           if (view) {
             clearFeedbackDecorationsInView(view);
           }
@@ -281,7 +304,6 @@ export const CodocEditor: React.FC = () => {
           break;
 
         case 'highlightAffectedNodes':
-          // Highlight affected nodes temporarily
           if (view && message.nodeIds) {
             highlightAffectedNodesInView(view, message.nodeIds, message.duration || 1500);
           }
@@ -311,9 +333,7 @@ export const CodocEditor: React.FC = () => {
           break;
 
         case 'generationProgress':
-          // Show generation progress in UI
           // message.stage: 'starting' | 'thinking' | 'editing' | 'executing' | 'complete' | 'error'
-          // message.message: progress message string
           console.log(`[Generation] ${message.stage}: ${message.message}`);
           break;
 
@@ -428,6 +448,30 @@ export const CodocEditor: React.FC = () => {
     }
   }, [dependencyGraph]);
 
+  // Update lint diagnostics when parsedSchema changes
+  useEffect(() => {
+    const view = getEditorView();
+    if (view && parsedSchema.length > 0) {
+      console.log('[CodocEditor] Updating lint diagnostics, schema nodes:', parsedSchema.length);
+      const diagnostics = buildDiagnosticsFromSchema(
+        parsedSchema,
+        view.state.doc.toString()
+      );
+      console.log('[CodocEditor] Built diagnostics:', diagnostics.length);
+      setCodocDiagnostics(diagnostics);
+      // Force linter to re-run with reconfiguration
+      view.dispatch({
+        effects: []
+      });
+      // Also force a second update after a short delay to ensure linter sees the changes
+      setTimeout(() => {
+        if (view) {
+          view.requestMeasure();
+        }
+      }, 100);
+    }
+  }, [parsedSchema]);
+
   // Restore cursor position after content updates
   useEffect(() => {
     if (savedCursorPosRef.current !== null) {
@@ -473,54 +517,117 @@ export const CodocEditor: React.FC = () => {
     vscode.postMessage({ type: 'clearAllFeedback' });
   }, []);
 
-  const handleContentChange = useCallback((value: string) => {
+  const onChange = useCallback((value: string) => {
+    const hasContentChanged = value !== previousContentRef.current;
+    previousContentRef.current = value;
+    
     setContent(value);
     vscode.postMessage({
       type: 'contentChanged',
-      content: value
+      content: value,
+      hasStructuralChange: hasContentChanged // Signal backend to check for structural diff
     });
-    
-    // Trigger feedforward generation on content changes
-    // requestFeedforward(value);
+
+    // Trigger feedforward after content change
+    if (hasContentChanged) {
+      const view = getEditorView();
+      if (view) {
+        const cursorPos = view.state.selection.main.head;
+        const line = view.state.doc.lineAt(cursorPos);
+        const cursorLine = line.number - 1;
+        const cursorColumn = cursorPos - line.from;
+        requestFeedforward(cursorLine, cursorColumn);
+      }
+    }
   }, [requestFeedforward]);
 
-  // Handle cursor position changes for preview
-  const handleCursorChange = useCallback((cursorLine: number) => {
-    // Only trigger preview if cursor moved to a different line
-    if (cursorLine === lastPreviewedLineRef.current) {
-      return;
-    }
+  // Handle cursor position changes for preview and feedforward
+  const handleCursorChange = useCallback((cursorLine: number, cursorColumn: number, isFromTyping: boolean = false) => {
+    const currentPos = { line: cursorLine, column: cursorColumn };
+    const lastPos = lastCursorPositionRef.current;
 
-    // Clear any pending preview requests
-    if (previewDebounceTimerRef.current) {
-      clearTimeout(previewDebounceTimerRef.current);
-    }
+    // Check if cursor position actually changed
+    const positionChanged = !lastPos || lastPos.line !== currentPos.line || lastPos.column !== currentPos.column;
 
-    // Debounce preview requests (only trigger after cursor stops moving)
-    previewDebounceTimerRef.current = setTimeout(() => {
-      // Check if there's a node at this line
-      const hasNodeAtLine = parsedSchema.some(node => {
-        const checkNode = (n: SchemaNode): boolean => {
-          if (n.lineNumber === cursorLine + 1) return true;
-          if (n.children) {
-            return n.children.some(checkNode);
-          }
-          return false;
-        };
-        return checkNode(node);
-      });
-
-      // Only send message if there's a node at this line
-      if (hasNodeAtLine) {
-        lastPreviewedLineRef.current = cursorLine;
-        vscode.postMessage({
-          type: 'cursorPositionChanged',
-          lineNumber: cursorLine + 1, // Convert to 1-based
-          parsedSchema
-        });
+    // If Alt key is pressed, don't clear suggestions or cancel feedforward
+    // This allows Alt+Arrow navigation without disrupting suggestions
+    // Also, if cursor moved due to typing, don't cancel feedforward
+    if (positionChanged && !isAltKeyPressedRef.current && !isFromTyping) {
+      console.log('[CodocEditor] Cursor moved without typing, canceling feedforward');
+      // Immediately clear feedforward suggestions when cursor moves (but not during Alt+Arrow or typing)
+      const view = getEditorView();
+      if (view) {
+        clearFeedforwardSuggestions(view);
       }
-    }, 300); // 300ms debounce - only trigger after cursor settles
+
+      // Cancel any pending feedforward request
+      if (feedforwardTimeoutRef.current) {
+        clearTimeout(feedforwardTimeoutRef.current);
+        feedforwardTimeoutRef.current = null;
+      }
+
+      // Update last position
+      lastCursorPositionRef.current = currentPos;
+    } else if (positionChanged && isAltKeyPressedRef.current) {
+      // Just update position tracking without clearing suggestions
+      lastCursorPositionRef.current = currentPos;
+    }
+
+    // Handle preview (existing logic)
+    if (cursorLine !== lastPreviewedLineRef.current) {
+      if (previewDebounceTimerRef.current) {
+        clearTimeout(previewDebounceTimerRef.current);
+      }
+
+      previewDebounceTimerRef.current = setTimeout(() => {
+        const hasNodeAtLine = parsedSchema.some(node => {
+          const checkNode = (n: SchemaNode): boolean => {
+            if (n.lineNumber === cursorLine + 1) return true;
+            if (n.children) {
+              return n.children.some(checkNode);
+            }
+            return false;
+          };
+          return checkNode(node);
+        });
+
+        if (hasNodeAtLine) {
+          lastPreviewedLineRef.current = cursorLine;
+          vscode.postMessage({
+            type: 'cursorPositionChanged',
+            lineNumber: cursorLine + 1,
+            parsedSchema
+          });
+        }
+      }, 300);
+    }
+
+    // DON'T trigger feedforward on cursor position change
+    // It will be triggered by content changes via the onChange handler
   }, [parsedSchema]);
+
+  // Track Alt key state
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey) {
+        isAltKeyPressedRef.current = true;
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (!e.altKey) {
+        isAltKeyPressedRef.current = false;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   // Combine all extensions
   const extensions = React.useMemo(() => [
@@ -530,13 +637,18 @@ export const CodocEditor: React.FC = () => {
     ...feedbackDecorationExtension(),   // Feedback from StructuralDiffEngine
     ...feedforwardExtension(),          // Suggestions from ImpactAnalysisService
     ...dependencyHighlightExtension(),  // Dependency-based opacity highlighting
+    ...createStyledCodocLinter(),       // Lint squiggly lines for freeform/diagnostics
     activityGutterExtension(),          // AI activity gutter icons
     EditorView.updateListener.of((update) => {
       // Track cursor position changes
       if (update.selectionSet) {
         const cursorPos = update.state.selection.main.head;
-        const cursorLine = update.state.doc.lineAt(cursorPos).number - 1;
-        handleCursorChange(cursorLine);
+        const line = update.state.doc.lineAt(cursorPos);
+        const cursorLine = line.number - 1;
+        const cursorColumn = cursorPos - line.from;
+        // Check if this cursor change is from typing (docChanged) or manual movement
+        const isFromTyping = update.docChanged;
+        handleCursorChange(cursorLine, cursorColumn, isFromTyping);
       }
     })
   ], [handleCursorChange]);
@@ -621,7 +733,7 @@ export const CodocEditor: React.FC = () => {
       <CodeMirror
         ref={editorRef}
         value={content}
-        onChange={handleContentChange}
+        onChange={onChange}
         extensions={extensions}
         style={{ 
           flex: 1,

@@ -2,9 +2,20 @@
  * Core type definitions for CoDoc system
  */
 
+/**
+ * Diagnostic information for schema nodes (lint-style)
+ */
+export interface SchemaDiagnostic {
+  severity: 'error' | 'warning' | 'info' | 'hint';
+  message: string;
+  line?: number;
+  column?: number;
+  source?: string;
+}
+
 export interface SchemaNode {
   id: string;
-  type: 'directory' | 'file' | 'function' | 'component' | 'reference' | 'note';
+  type: 'directory' | 'file' | 'function' | 'component' | 'reference' | 'note' | 'freeform' | 'comment';
   name: string;
   path: string;
   extension?: string;
@@ -24,6 +35,16 @@ export interface SchemaNode {
   functionSignature?: string;
   componentProps?: string[];
   isExported?: boolean;
+  
+  // Freeform/unrecognized node tracking
+  isFreeform?: boolean; // True if this is a freeform/unrecognized node
+  isComment?: boolean; // True if this is a comment node (starts with #)
+  isUnrecognized?: boolean; // True if this node couldn't be matched to codebase
+  originalText?: string; // Original text for freeform nodes
+  rawText?: string; // Alias for originalText (backwards compat)
+  validationError?: string; // Error message explaining why unrecognized
+  isPending?: boolean; // True if waiting for code generation
+  diagnostics?: SchemaDiagnostic[]; // Lint-style diagnostics for this node
 }
 
 /**

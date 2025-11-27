@@ -1,6 +1,7 @@
 /**
  * Main CODOC parser with dependency tracking
  * Builds hierarchical SchemaNode tree with validation
+ * Supports freeform nodes for unrecognized content
  */
 
 import { SchemaNode } from "../types.js";
@@ -13,6 +14,7 @@ interface ParsingContext {
   allNodes: SchemaNode[];
   nodeCounter: number;
   validationMessages: string[];
+  unrecognizedNodes: SchemaNode[]; // Track freeform/unrecognized nodes
 }
 
 export class CodocParser {
@@ -20,14 +22,16 @@ export class CodocParser {
 
   /**
    * Parse CODOC content into SchemaNode tree with dependency tracking
+   * Now supports freeform nodes for content that can't be parsed
    */
-  parse(content: string): { nodes: SchemaNode[]; errors: string[] } {
+  parse(content: string): { nodes: SchemaNode[]; errors: string[]; unrecognizedNodes: SchemaNode[] } {
     const lines = content.split('\n');
     const context: ParsingContext = {
       stack: [],
       allNodes: [],
       nodeCounter: 0,
-      validationMessages: []
+      validationMessages: [],
+      unrecognizedNodes: []
     };
 
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
@@ -37,6 +41,19 @@ export class CodocParser {
 
       // Skip empty lines
       if (!trimmed) {
+        continue;
+      }
+
+      // Check if this is a comment line (starts with #)
+      if (trimmed.startsWith('#')) {
+        const indentLevel = Math.floor(leadingSpaces / this.indentUnit);
+        const commentNode = this.createCommentNode(
+          trimmed,
+          lineIndex + 1,
+          indentLevel,
+          context
+        );
+        this.attachNodeToTree(commentNode, indentLevel, context);
         continue;
       }
 
@@ -57,9 +74,15 @@ export class CodocParser {
           if (this.isIncompleteToken(trimmed)) {
             continue;
           }
-          context.validationMessages.push(
-            `Line ${lineIndex + 1}: Lexing error - ${lexResult.errors[0].message}`
+          // Create freeform node for unrecognized content
+          const freeformNode = this.createFreeformNode(
+            trimmed, 
+            lineIndex + 1, 
+            indentLevel, 
+            context,
+            `Lexing error: ${lexResult.errors[0].message}`
           );
+          this.attachNodeToTree(freeformNode, indentLevel, context);
           continue;
         }
 
@@ -71,15 +94,30 @@ export class CodocParser {
           if (this.isIncompleteToken(trimmed)) {
             continue;
           }
-          context.validationMessages.push(
-            `Line ${lineIndex + 1}: Parsing error - ${lineParser.errors[0].message}`
+          // Create freeform node for unrecognized content
+          const freeformNode = this.createFreeformNode(
+            trimmed, 
+            lineIndex + 1, 
+            indentLevel, 
+            context,
+            `Parse error: ${lineParser.errors[0].message}`
           );
+          this.attachNodeToTree(freeformNode, indentLevel, context);
           continue;
         }
 
         // Build node
         const node = this.buildNodeFromCST(cst, trimmed, lineIndex + 1, indentLevel, context);
         if (!node) {
+          // If we couldn't build a typed node, create a freeform node
+          const freeformNode = this.createFreeformNode(
+            trimmed, 
+            lineIndex + 1, 
+            indentLevel, 
+            context,
+            'Could not determine node type'
+          );
+          this.attachNodeToTree(freeformNode, indentLevel, context);
           continue;
         }
 
@@ -87,16 +125,92 @@ export class CodocParser {
         this.attachNodeToTree(node, indentLevel, context);
 
       } catch (error) {
-        context.validationMessages.push(
-          `Line ${lineIndex + 1}: Unexpected error - ${error}`
+        // Create freeform node for unexpected errors
+        const freeformNode = this.createFreeformNode(
+          trimmed, 
+          lineIndex + 1, 
+          indentLevel, 
+          context,
+          `Unexpected error: ${error}`
         );
+        this.attachNodeToTree(freeformNode, indentLevel, context);
       }
     }
 
     return {
       nodes: context.allNodes.filter(n => !n.parent),
-      errors: context.validationMessages
+      errors: context.validationMessages,
+      unrecognizedNodes: context.unrecognizedNodes
     };
+  }
+
+  /**
+   * Create a comment node for lines starting with #
+   * Comments are preserved as-is and tracked in the structure
+   */
+  private createCommentNode(
+    rawText: string,
+    lineNumber: number,
+    indentLevel: number,
+    context: ParsingContext
+  ): SchemaNode {
+    const id = `comment_${context.nodeCounter++}`;
+    const commentText = rawText.trim().substring(1).trim(); // Remove leading # and trim
+    
+    const node: SchemaNode = {
+      id,
+      type: 'comment',
+      name: commentText || '(empty comment)',
+      path: `comment_${lineNumber}`,
+      lineNumber,
+      column: indentLevel * this.indentUnit,
+      dependencies: [],
+      dependents: [],
+      contentHash: this.calculateHash(rawText),
+      isFreeform: true,
+      isComment: true,
+      originalText: rawText.trim(),
+      content: commentText
+    };
+    
+    context.allNodes.push(node);
+    return node;
+  }
+
+  /**
+   * Create a freeform node for unrecognized content
+   * Preserves the content and marks it for linting
+   */
+  private createFreeformNode(
+    rawText: string,
+    lineNumber: number,
+    indentLevel: number,
+    context: ParsingContext,
+    validationError: string
+  ): SchemaNode {
+    const id = `freeform_${context.nodeCounter++}`;
+    const node: SchemaNode = {
+      id,
+      type: 'freeform',
+      name: rawText.substring(0, 30) + (rawText.length > 30 ? '...' : ''),
+      path: `freeform:${lineNumber}`,
+      rawText,
+      lineNumber,
+      column: indentLevel * this.indentUnit,
+      dependencies: [],
+      dependents: [],
+      contentHash: this.calculateHash(rawText),
+      isUnrecognized: true,
+      validationError,
+      isPending: true
+    };
+    
+    context.unrecognizedNodes.push(node);
+    context.validationMessages.push(
+      `Line ${lineNumber}: Unrecognized content preserved as freeform - ${validationError}`
+    );
+    
+    return node;
   }
 
   /**
@@ -321,16 +435,18 @@ export class CodocParser {
 
   /**
    * Check if childType can be child of parentType
+   * Freeform nodes can be children of directories and files
    */
   private canBeChild(childType: string, parentType: string): boolean {
     const validRelationships: Record<string, string[]> = {
-      directory: ['directory', 'file'],
-      file: ['function', 'component', 'variable', 'reference', 'note'],
-      function: [],
-      component: [],
+      directory: ['directory', 'file', 'freeform'],
+      file: ['function', 'component', 'variable', 'reference', 'note', 'freeform'],
+      function: ['freeform'],
+      component: ['freeform'],
       variable: [],
       reference: [],
-      note: []
+      note: [],
+      freeform: ['freeform'] // Freeform can have freeform children
     };
 
     return validRelationships[parentType]?.includes(childType) || false;

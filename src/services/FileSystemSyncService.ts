@@ -3,6 +3,11 @@
  * 
  * Robust synchronization between CoDoc schema (single source of truth) and file system.
  * Handles complex operations: create, delete, rename, move, reorder with AST awareness.
+ * 
+ * Enhanced with:
+ * - Batch operation support for multiple simultaneous changes
+ * - Graceful error handling (tolerant mode)
+ * - Freeform node support (unrecognized content preserved)
  */
 
 import * as vscode from 'vscode';
@@ -23,17 +28,20 @@ import {
 } from './BabelUtils.js';
 
 export interface SyncOperation {
-  type: 'create-file' | 'create-folder' | 'create-placeholder' | 'delete' | 'rename' | 'move';
+  type: 'create-file' | 'create-folder' | 'create-placeholder' | 'delete' | 'rename' | 'move' | 'skip';
   node: SchemaNode;
   oldPath?: string;
   newPath?: string;
   affectedNodes?: string[]; // Node IDs affected by this operation
+  error?: string; // Error message if operation failed but was tolerated
 }
 
 export interface SyncResult {
   success: boolean;
   operations: SyncOperation[];
   errors: string[];
+  warnings: string[]; // Non-fatal issues
+  skippedNodes: SchemaNode[]; // Nodes that were skipped (freeform, etc.)
   revertToken?: string; // Token to revert all operations
 }
 
@@ -50,6 +58,10 @@ export class FileSystemSyncService {
   
   // Track all code elements to prevent duplicates
   private codeElementRegistry: Map<string, Set<string>> = new Map(); // filePath -> Set<elementName>
+  
+  // Pending operations queue for batch processing
+  private pendingOperations: SyncOperation[] = [];
+  private isBatchProcessing = false;
 
   constructor(workspaceRoot: string) {
     this.workspaceRoot = workspaceRoot;
@@ -62,6 +74,11 @@ export class FileSystemSyncService {
     this.codeElementRegistry.clear();
     
     const processNode = async (node: SchemaNode) => {
+      // Skip freeform/unrecognized nodes
+      if (node.type === 'freeform' || node.isUnrecognized) {
+        return;
+      }
+      
       if (node.type === 'function' || node.type === 'component') {
         const filePath = this.getFilePathForNode(node);
         if (filePath) {
@@ -86,6 +103,7 @@ export class FileSystemSyncService {
 
   /**
    * Synchronize CoDoc changes with file system (CoDoc is source of truth)
+   * Enhanced with batch support and tolerance for failures
    */
   async syncChanges(
     diff: StructuralDiff,
@@ -95,7 +113,9 @@ export class FileSystemSyncService {
     const result: SyncResult = {
       success: true,
       operations: [],
-      errors: []
+      errors: [],
+      warnings: [],
+      skippedNodes: []
     };
 
     try {
@@ -110,54 +130,171 @@ export class FileSystemSyncService {
       }
       result.revertToken = snapshot.timestamp.toString();
 
+      // Group operations by type for batch processing
+      const addedFiles: SchemaNode[] = [];
+      const addedFolders: SchemaNode[] = [];
+      const addedElements: SchemaNode[] = [];
+      const skipped: SchemaNode[] = [];
+      
+      // Categorize additions
+      for (const node of diff.added) {
+        if (node.type === 'freeform' || node.isUnrecognized || node.isComment) {
+          skipped.push(node);
+          continue;
+        }
+        
+        if (node.type === 'directory') {
+          addedFolders.push(node);
+        } else if (node.type === 'file') {
+          addedFiles.push(node);
+        } else if (node.type === 'function' || node.type === 'component') {
+          addedElements.push(node);
+        } else {
+          skipped.push(node); // Skip notes, references, etc. for now
+        }
+      }
+      
+      result.skippedNodes = skipped;
+      if (skipped.length > 0) {
+        result.warnings.push(`Skipped ${skipped.length} unrecognized or freeform nodes`);
+      }
+
       // Process in correct order: renames first, then removals, then additions, then modifications
       
       // 1. Process renames (before removals to avoid conflicts)
       for (const { from, to } of diff.renamed) {
+        // Skip freeform nodes and comments
+        if (from.type === 'freeform' || from.isUnrecognized || from.isComment || 
+            to.type === 'freeform' || to.isUnrecognized || to.isComment) {
+          result.warnings.push(`Skipped rename for freeform/comment node: ${from.name} -> ${to.name}`);
+          continue;
+        }
+        
         try {
-          const op = await this.renameNode(from, to);
+          const op = await this.renameNodeTolerant(from, to);
           result.operations.push(op);
         } catch (error) {
-          result.errors.push(`Failed to rename ${from.path} to ${to.path}: ${error}`);
-          result.success = false;
+          const errorMsg = `Failed to rename ${from.path} to ${to.path}: ${error}`;
+          result.errors.push(errorMsg);
+          result.operations.push({
+            type: 'skip',
+            node: to,
+            oldPath: from.path,
+            newPath: to.path,
+            error: errorMsg
+          });
         }
       }
 
       // 2. Process removals (with dependency awareness)
       for (const node of diff.removed) {
+        // Skip freeform nodes and comments
+        if (node.type === 'freeform' || node.isUnrecognized || node.isComment) {
+          result.warnings.push(`Skipped removal of freeform/comment node: ${node.name}`);
+          continue;
+        }
+        
         try {
           const affectedNodes = this.getAffectedNodes(node, dependencyGraph);
-          const op = await this.deleteNode(node, affectedNodes);
+          const op = await this.deleteNodeTolerant(node, affectedNodes);
           result.operations.push(op);
         } catch (error) {
-          result.errors.push(`Failed to delete ${node.path}: ${error}`);
-          result.success = false;
+          const errorMsg = `Failed to delete ${node.path}: ${error}`;
+          result.errors.push(errorMsg);
+          result.operations.push({
+            type: 'skip',
+            node,
+            error: errorMsg
+          });
         }
       }
 
-      // 3. Process additions (create placeholders)
-      for (const node of diff.added) {
+      // 3. Process additions in batch (folders first, then files, then elements)
+      // Process folders
+      for (const node of addedFolders) {
         try {
-          const op = await this.createPlaceholder(node);
+          const op = await this.createPlaceholderTolerant(node);
           result.operations.push(op);
         } catch (error) {
-          result.errors.push(`Failed to create ${node.path}: ${error}`);
-          result.success = false;
+          const errorMsg = `Failed to create folder ${node.path}: ${error}`;
+          result.warnings.push(errorMsg);
+          result.operations.push({
+            type: 'skip',
+            node,
+            error: errorMsg
+          });
+        }
+      }
+      
+      // Process files
+      for (const node of addedFiles) {
+        try {
+          const op = await this.createPlaceholderTolerant(node);
+          result.operations.push(op);
+        } catch (error) {
+          const errorMsg = `Failed to create file ${node.path}: ${error}`;
+          result.warnings.push(errorMsg);
+          result.operations.push({
+            type: 'skip',
+            node,
+            error: errorMsg
+          });
+        }
+      }
+      
+      // Process code elements in batch (grouped by file)
+      const elementsByFile = new Map<string, SchemaNode[]>();
+      for (const node of addedElements) {
+        const filePath = this.getFilePathForNode(node);
+        if (filePath) {
+          if (!elementsByFile.has(filePath)) {
+            elementsByFile.set(filePath, []);
+          }
+          elementsByFile.get(filePath)!.push(node);
+        } else {
+          result.warnings.push(`Could not determine file for element: ${node.name}`);
+          result.skippedNodes.push(node);
+        }
+      }
+      
+      // Batch add elements per file
+      for (const [filePath, elements] of elementsByFile) {
+        try {
+          const ops = await this.batchAddElementsToFile(filePath, elements);
+          result.operations.push(...ops);
+        } catch (error) {
+          const errorMsg = `Failed to add elements to ${filePath}: ${error}`;
+          result.warnings.push(errorMsg);
+          for (const element of elements) {
+            result.operations.push({
+              type: 'skip',
+              node: element,
+              error: errorMsg
+            });
+          }
         }
       }
 
       // 4. Process modifications (reorder, update)
       for (const node of diff.modified) {
+        // Skip freeform nodes and comments
+        if (node.type === 'freeform' || node.isUnrecognized || node.isComment) {
+          continue;
+        }
+        
         try {
           const op = await this.updateNode(node);
           if (op) {
             result.operations.push(op);
           }
         } catch (error) {
-          result.errors.push(`Failed to update ${node.path}: ${error}`);
-          result.success = false;
+          const errorMsg = `Failed to update ${node.path}: ${error}`;
+          result.warnings.push(errorMsg);
         }
       }
+
+      // Determine overall success (success even if some operations had warnings)
+      result.success = result.errors.length === 0;
 
     } catch (error) {
       result.success = false;
@@ -168,78 +305,48 @@ export class FileSystemSyncService {
   }
 
   /**
-   * Create placeholder for new node (prevent duplicates)
+   * Batch add multiple code elements to a single file
+   * More efficient than adding one at a time
    */
-  private async createPlaceholder(node: SchemaNode): Promise<SyncOperation> {
-    const fullPath = path.join(this.workspaceRoot, node.path);
+  private async batchAddElementsToFile(filePath: string, elements: SchemaNode[]): Promise<SyncOperation[]> {
+    const operations: SyncOperation[] = [];
+    const fullFilePath = path.join(this.workspaceRoot, filePath);
     
-    if (node.type === 'directory') {
-      await fs.mkdir(fullPath, { recursive: true });
-      return {
-        type: 'create-folder',
-        node
-      };
-    } else if (node.type === 'file') {
-      // Create parent directory if needed
-      const dirPath = path.dirname(fullPath);
-      await fs.mkdir(dirPath, { recursive: true });
-      
-      // Check if file already exists
-      try {
-        await fs.access(fullPath);
-        return {
-          type: 'create-file',
-          node
-        };
-      } catch {
-        // File doesn't exist, create it
-        const content = this.generateFileTemplate(node);
-        await fs.writeFile(fullPath, content, 'utf-8');
-      }
-      
-      return {
-        type: 'create-file',
-        node
-      };
-    } else if (node.type === 'function' || node.type === 'component') {
-      // Get file path for this element
-      const filePath = this.getFilePathForNode(node);
-      if (!filePath) {
-        throw new Error(`Cannot determine file path for ${node.name}`);
-      }
-      
-      const fullFilePath = path.join(this.workspaceRoot, filePath);
-      
+    // Ensure file exists
+    try {
+      await fs.access(fullFilePath);
+    } catch {
+      // File doesn't exist, create it
+      await fs.mkdir(path.dirname(fullFilePath), { recursive: true });
+      await fs.writeFile(fullFilePath, '', 'utf-8');
+    }
+    
+    let content = await fs.readFile(fullFilePath, 'utf-8');
+    let modified = false;
+    
+    for (const node of elements) {
       // Check if element already exists in registry
       const registry = this.codeElementRegistry.get(filePath);
       if (registry?.has(node.name)) {
-        
-        // Double-check in actual file
-        try {
-          const content = await fs.readFile(fullFilePath, 'utf-8');
-          if (elementExistsInCode(content, node.name, node.type as 'function' | 'component')) {
-            return {
-              type: 'create-placeholder',
-              node
-            };
-          }
-        } catch (error) {
-          // File doesn't exist, will create below
+        // Double-check in actual content
+        if (elementExistsInCode(content, node.name, node.type as 'function' | 'component')) {
+          operations.push({
+            type: 'skip',
+            node,
+            error: 'Element already exists'
+          });
+          continue;
         }
       }
       
-      // Ensure file exists
-      try {
-        await fs.access(fullFilePath);
-      } catch {
-        // File doesn't exist, create it
-        await fs.mkdir(path.dirname(fullFilePath), { recursive: true });
-        const fileContent = this.generateFileTemplate({ ...node, path: filePath, type: 'file' });
-        await fs.writeFile(fullFilePath, fileContent, 'utf-8');
-      }
+      // Generate placeholder and append
+      const placeholder = this.generateCodePlaceholder(node);
       
-      // Add placeholder code using AST
-      await this.addPlaceholderCodeRobust(fullFilePath, node);
+      if (!content.endsWith('\n') && content.length > 0) {
+        content += '\n';
+      }
+      content += `\n${placeholder}\n`;
+      modified = true;
       
       // Update registry
       if (!this.codeElementRegistry.has(filePath)) {
@@ -247,42 +354,145 @@ export class FileSystemSyncService {
       }
       this.codeElementRegistry.get(filePath)!.add(node.name);
       
-      return {
+      operations.push({
         type: 'create-placeholder',
         node
-      };
+      });
     }
-
-    return { type: 'create-placeholder', node };
+    
+    // Write once after all modifications
+    if (modified) {
+      await fs.writeFile(fullFilePath, content, 'utf-8');
+    }
+    
+    return operations;
   }
 
   /**
-   * Delete node from file system (robust AST-based removal)
+   * Create placeholder for new node - tolerant version
+   * Returns operation with error info instead of throwing
    */
-  private async deleteNode(node: SchemaNode, affectedNodes: string[]): Promise<SyncOperation> {
+  private async createPlaceholderTolerant(node: SchemaNode): Promise<SyncOperation> {
+    // Skip freeform nodes and comments
+    if (node.type === 'freeform' || node.isUnrecognized || node.isComment) {
+      return {
+        type: 'skip',
+        node,
+        error: 'Freeform/comment node - skipped'
+      };
+    }
+    
+    const fullPath = path.join(this.workspaceRoot, node.path);
+    
+    if (node.type === 'directory') {
+      try {
+        await fs.mkdir(fullPath, { recursive: true });
+        return { type: 'create-folder', node };
+      } catch (error) {
+        return {
+          type: 'skip',
+          node,
+          error: `Could not create directory: ${error}`
+        };
+      }
+    } else if (node.type === 'file') {
+      try {
+        // Create parent directory if needed
+        const dirPath = path.dirname(fullPath);
+        await fs.mkdir(dirPath, { recursive: true });
+        
+        // Check if file already exists
+        try {
+          await fs.access(fullPath);
+          return { type: 'create-file', node };
+        } catch {
+          // File doesn't exist, create it
+          const content = this.generateFileTemplate(node);
+          await fs.writeFile(fullPath, content, 'utf-8');
+        }
+        
+        return { type: 'create-file', node };
+      } catch (error) {
+        return {
+          type: 'skip',
+          node,
+          error: `Could not create file: ${error}`
+        };
+      }
+    } else if (node.type === 'function' || node.type === 'component') {
+      // Handle via batch processing
+      const filePath = this.getFilePathForNode(node);
+      if (!filePath) {
+        return {
+          type: 'skip',
+          node,
+          error: 'Cannot determine file path for element'
+        };
+      }
+      
+      try {
+        const ops = await this.batchAddElementsToFile(filePath, [node]);
+        return ops[0] || { type: 'create-placeholder', node };
+      } catch (error) {
+        return {
+          type: 'skip',
+          node,
+          error: `Could not add element: ${error}`
+        };
+      }
+    }
+
+    return { type: 'skip', node, error: 'Unknown node type' };
+  }
+
+  /**
+   * Delete node from file system - tolerant version
+   */
+  private async deleteNodeTolerant(node: SchemaNode, affectedNodes: string[]): Promise<SyncOperation> {
+    // Skip freeform nodes and comments - they don't have filesystem representations
+    if (node.type === 'freeform' || node.isUnrecognized || node.isComment) {
+      return {
+        type: 'skip',
+        node,
+        affectedNodes,
+        error: 'Freeform/comment node - skipped'
+      };
+    }
+    
     if (node.type === 'directory') {
       const fullPath = path.join(this.workspaceRoot, node.path);
       try {
         await fs.rm(fullPath, { recursive: true, force: true });
       } catch (error) {
-        console.warn(`Directory ${fullPath} not found or already deleted`);
+        return {
+          type: 'skip',
+          node,
+          affectedNodes,
+          error: `Directory not found or could not be deleted: ${error}`
+        };
       }
     } else if (node.type === 'file') {
       const fullPath = path.join(this.workspaceRoot, node.path);
       try {
         await fs.unlink(fullPath);
-        
-        // Remove all elements in this file from registry
         this.codeElementRegistry.delete(node.path);
       } catch (error) {
-        console.warn(`File ${fullPath} not found or already deleted`);
+        return {
+          type: 'skip',
+          node,
+          affectedNodes,
+          error: `File not found or could not be deleted: ${error}`
+        };
       }
     } else if (node.type === 'function' || node.type === 'component') {
-      // Remove the code element from the file using AST
       const filePath = this.getFilePathForNode(node);
       if (!filePath) {
-        console.warn(`Cannot determine file path for ${node.name}`);
-        return { type: 'delete', node, affectedNodes };
+        return {
+          type: 'skip',
+          node,
+          affectedNodes,
+          error: 'Cannot determine file path for element'
+        };
       }
       
       const fullFilePath = path.join(this.workspaceRoot, filePath);
@@ -290,27 +500,27 @@ export class FileSystemSyncService {
       try {
         await this.removeCodeElementRobust(fullFilePath, node.name, node.type);
         
-        // Update registry
         const registry = this.codeElementRegistry.get(filePath);
         if (registry) {
           registry.delete(node.name);
         }
       } catch (error) {
-        console.warn(`Could not remove code element ${node.name}: ${error}`);
+        return {
+          type: 'skip',
+          node,
+          affectedNodes,
+          error: `Could not remove code element: ${error}`
+        };
       }
     }
 
-    return {
-      type: 'delete',
-      node,
-      affectedNodes
-    };
+    return { type: 'delete', node, affectedNodes };
   }
 
   /**
-   * Rename node in file system (handles files, folders, and code elements)
+   * Rename node in file system - tolerant version
    */
-  private async renameNode(from: SchemaNode, to: SchemaNode): Promise<SyncOperation> {
+  private async renameNodeTolerant(from: SchemaNode, to: SchemaNode): Promise<SyncOperation> {
     if (from.type === 'directory') {
       const oldPath = path.join(this.workspaceRoot, from.path);
       const newPath = path.join(this.workspaceRoot, to.path);
@@ -319,7 +529,13 @@ export class FileSystemSyncService {
         await fs.mkdir(path.dirname(newPath), { recursive: true });
         await fs.rename(oldPath, newPath);
       } catch (error) {
-        console.warn(`Could not rename directory ${oldPath} to ${newPath}: ${error}`);
+        return {
+          type: 'skip',
+          node: to,
+          oldPath: from.path,
+          newPath: to.path,
+          error: `Could not rename directory: ${error}`
+        };
       }
     } else if (from.type === 'file') {
       const oldPath = path.join(this.workspaceRoot, from.path);
@@ -329,22 +545,32 @@ export class FileSystemSyncService {
         await fs.mkdir(path.dirname(newPath), { recursive: true });
         await fs.rename(oldPath, newPath);
         
-        // Update registry
         const registry = this.codeElementRegistry.get(from.path);
         if (registry) {
           this.codeElementRegistry.delete(from.path);
           this.codeElementRegistry.set(to.path, registry);
         }
       } catch (error) {
-        console.warn(`Could not rename file ${oldPath} to ${newPath}: ${error}`);
+        return {
+          type: 'skip',
+          node: to,
+          oldPath: from.path,
+          newPath: to.path,
+          error: `Could not rename file: ${error}`
+        };
       }
     } else if (from.type === 'function' || from.type === 'component') {
       const oldFilePath = this.getFilePathForNode(from);
       const newFilePath = this.getFilePathForNode(to);
       
       if (!oldFilePath || !newFilePath) {
-        console.warn(`Cannot determine file paths for rename: ${from.name} -> ${to.name}`);
-        return { type: 'rename', node: to, oldPath: from.path, newPath: to.path };
+        return {
+          type: 'skip',
+          node: to,
+          oldPath: from.path,
+          newPath: to.path,
+          error: 'Cannot determine file paths for rename'
+        };
       }
       
       // Case 1: Rename within same file
@@ -353,29 +579,31 @@ export class FileSystemSyncService {
         try {
           await this.renameCodeElementRobust(fullFilePath, from.name, to.name, from.type);
           
-          // Update registry
           const registry = this.codeElementRegistry.get(oldFilePath);
           if (registry) {
             registry.delete(from.name);
             registry.add(to.name);
           }
         } catch (error) {
-          console.warn(`Could not rename code element ${from.name} to ${to.name}: ${error}`);
+          return {
+            type: 'skip',
+            node: to,
+            oldPath: from.path,
+            newPath: to.path,
+            error: `Could not rename code element: ${error}`
+          };
         }
       } 
       // Case 2: Move to different file
       else {
         try {
-          // Remove from old file
           const oldFullPath = path.join(this.workspaceRoot, oldFilePath);
           const elementCode = await this.extractCodeElement(oldFullPath, from.name, from.type);
           await this.removeCodeElementRobust(oldFullPath, from.name, from.type);
           
-          // Add to new file
           const newFullPath = path.join(this.workspaceRoot, newFilePath);
           await this.insertCodeElement(newFullPath, elementCode, to.name);
           
-          // Update registry
           const oldRegistry = this.codeElementRegistry.get(oldFilePath);
           if (oldRegistry) {
             oldRegistry.delete(from.name);
@@ -385,7 +613,13 @@ export class FileSystemSyncService {
           }
           this.codeElementRegistry.get(newFilePath)!.add(to.name);
         } catch (error) {
-          console.warn(`Could not move code element ${from.name} to ${newFilePath}: ${error}`);
+          return {
+            type: 'skip',
+            node: to,
+            oldPath: from.path,
+            newPath: to.path,
+            error: `Could not move code element: ${error}`
+          };
         }
       }
     }
@@ -402,6 +636,11 @@ export class FileSystemSyncService {
    * Update existing node (handle reordering, modifications)
    */
   private async updateNode(node: SchemaNode): Promise<SyncOperation | null> {
+    // Skip freeform nodes
+    if (node.type === 'freeform' || node.isUnrecognized) {
+      return null;
+    }
+    
     // For code elements, check if they need reordering or updating
     if (node.type === 'function' || node.type === 'component') {
       const filePath = this.getFilePathForNode(node);

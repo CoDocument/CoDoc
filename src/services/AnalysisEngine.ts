@@ -646,7 +646,7 @@ export class AnalysisEngine {
    * Build CODOC structure from snapshot
    * Now also assigns correct line numbers based on tree traversal order
    */
-  constructCodoc(snapshot: CodebaseSnapshot): SchemaNode[] {
+  constructCodoc(snapshot: CodebaseSnapshot, existingComments?: SchemaNode[]): SchemaNode[] {
     const root: SchemaNode = {
       id: 'root',
       type: 'directory',
@@ -668,6 +668,11 @@ export class AnalysisEngine {
     // Add empty directories that don't have any files
     for (const dir of snapshot.directories) {
       this.ensureDirectoryExists(root, dir);
+    }
+
+    // Preserve existing comments by re-inserting them at their original positions
+    if (existingComments && existingComments.length > 0) {
+      this.reinsertComments(root, existingComments);
     }
 
     // Sort nodes to match VS Code explorer ordering before assigning line numbers
@@ -714,6 +719,113 @@ export class AnalysisEngine {
       current = dirNode;
     }
   }
+
+  /**
+   * Reinsert comments at their original positions in the tree
+   * Comments are matched by their path context (parent path)
+   */
+  private reinsertComments(root: SchemaNode, comments: SchemaNode[]): void {
+    console.log('[AnalysisEngine] Reinserting', comments.length, 'comments');
+    
+    // First, check if any comments already exist in the tree (to avoid duplication)
+    const existingComments = this.extractAllComments(root);
+    const existingCommentKeys = new Set(
+      existingComments.map(c => `${c.content || c.name}-${c.lineNumber}`)
+    );
+    
+    for (const comment of comments) {
+      if (!comment.isComment) continue;
+      
+      // Skip if this comment already exists in the tree
+      const commentKey = `${comment.content || comment.name}-${comment.lineNumber}`;
+      if (existingCommentKeys.has(commentKey)) {
+        console.log('[AnalysisEngine] Skipping duplicate comment:', comment.content || comment.name);
+        continue;
+      }
+      
+      // Determine where to reinsert based on comment's parent path
+      const targetNode = this.findNodeForCommentInsertion(root, comment);
+      
+      if (targetNode) {
+        if (!targetNode.children) {
+          targetNode.children = [];
+        }
+        
+        // Create a fresh comment node (to avoid reference issues)
+        // Explicitly omit parent to avoid circular references
+        const { parent, children, ...commentData } = comment;
+        const freshComment: SchemaNode = {
+          ...commentData,
+          lineNumber: 0, // Will be recalculated
+          children: undefined // Comments shouldn't have children
+        };
+        
+        targetNode.children.push(freshComment);
+      } else {
+        // If no parent found, add to root level
+        if (!root.children) {
+          root.children = [];
+        }
+        const { parent, children, ...commentData } = comment;
+        const freshComment: SchemaNode = {
+          ...commentData,
+          lineNumber: 0,
+          children: undefined
+        };
+        root.children.push(freshComment);
+      }
+    }
+  }
+
+  /**
+   * Extract all comments from a tree (used to check for duplicates)
+   */
+  private extractAllComments(node: SchemaNode): SchemaNode[] {
+    const comments: SchemaNode[] = [];
+    
+    if (node.isComment) {
+      comments.push(node);
+    }
+    
+    if (node.children) {
+      for (const child of node.children) {
+        comments.push(...this.extractAllComments(child));
+      }
+    }
+    
+    return comments;
+  }
+
+  /**
+   * Find the appropriate node to insert a comment
+   * Uses parent path from the comment's original location
+   */
+  private findNodeForCommentInsertion(root: SchemaNode, comment: SchemaNode): SchemaNode | null {
+    // If comment had a parent, try to find it by path
+    if (comment.parent) {
+      const parentPath = comment.parent.path;
+      return this.findNodeByPath(root, parentPath);
+    }
+    return root;
+  }
+
+  /**
+   * Find a node by its path in the tree
+   */
+  private findNodeByPath(root: SchemaNode, path: string): SchemaNode | null {
+    if (root.path === path) {
+      return root;
+    }
+    
+    if (root.children) {
+      for (const child of root.children) {
+        const found = this.findNodeByPath(child, path);
+        if (found) return found;
+      }
+    }
+    
+    return null;
+  }
   
   /**
    * Recursively assign line numbers to nodes based on their position in serialized CoDoc
@@ -735,14 +847,61 @@ export class AnalysisEngine {
 
   /**
    * Sort schema nodes to match VS Code explorer ordering (directories first, alphabetical)
+   * Comments are kept in their relative positions
    */
   private sortSchemaNodes(nodes?: SchemaNode[]): void {
     if (!nodes || nodes.length === 0) {
       return;
     }
 
-    nodes.sort((a, b) => this.compareSchemaNodes(a, b));
+    // Separate comments from other nodes
+    const comments: SchemaNode[] = [];
+    const nonComments: SchemaNode[] = [];
+    
+    for (const node of nodes) {
+      if (node.isComment) {
+        comments.push(node);
+      } else {
+        nonComments.push(node);
+      }
+    }
 
+    // Sort non-comment nodes
+    nonComments.sort((a, b) => this.compareSchemaNodes(a, b));
+
+    // Merge back: interleave comments at their relative positions
+    // Comments should stay near their original neighboring nodes
+    nodes.length = 0;
+    
+    // If we have comments with position info, try to preserve their relative positions
+    if (comments.length > 0 && comments[0].lineNumber !== undefined) {
+      let commentIndex = 0;
+      let nodeIndex = 0;
+      
+      while (nodeIndex < nonComments.length || commentIndex < comments.length) {
+        if (commentIndex >= comments.length) {
+          nodes.push(nonComments[nodeIndex++]);
+        } else if (nodeIndex >= nonComments.length) {
+          nodes.push(comments[commentIndex++]);
+        } else {
+          // Place comment before or after node based on original line numbers
+          const comment = comments[commentIndex];
+          const node = nonComments[nodeIndex];
+          
+          // If comment was originally before this node, insert it first
+          if (comment.lineNumber < node.lineNumber) {
+            nodes.push(comments[commentIndex++]);
+          } else {
+            nodes.push(nonComments[nodeIndex++]);
+          }
+        }
+      }
+    } else {
+      // Fallback: if no line numbers, just append comments at the end
+      nodes.push(...nonComments, ...comments);
+    }
+
+    // Recursively sort children (non-file nodes)
     for (const node of nodes) {
       if (node.type !== 'file' && node.children && node.children.length > 0) {
         this.sortSchemaNodes(node.children);
