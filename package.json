@@ -74,17 +74,23 @@
     "configuration": {
       "title": "CoDoc",
       "properties": {
+        "codoc.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic Claude API key for code generation with Claude Agent SDK",
+          "order": 1
+        },
         "codoc.openaiApiKey": {
           "type": "string",
           "default": "",
           "description": "OpenAI API key for impact analysis and code generation features",
-          "order": 1
+          "order": 2
         },
         "codoc.autoSync": {
           "type": "boolean",
           "default": true,
           "description": "Automatically sync CoDoc file with codebase changes",
-          "order": 2
+          "order": 3
         }
       }
     }
@@ -94,7 +100,9 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build:webview": "cd webview-ui && npm run build",
-    "dev:webview": "cd webview-ui && npm run dev"
+    "dev:webview": "cd webview-ui && npm run dev",
+    "test-generate": "node test-generate.js",
+    "debug": "node debug.js"
   },
   "devDependencies": {
     "@babel/traverse": "^7.28.5",
@@ -103,12 +111,17 @@
     "@types/node": "^24.10.1",
     "@types/vscode": "^1.80.0",
     "chevrotain": "^11.0.3",
-    "typescript": "^5.0.0"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.55",
     "@babel/parser": "^7.23.0",
     "@babel/types": "^7.23.0",
     "@opencode-ai/sdk": "^1.0.112",
     "openai": "^6.9.1"
-  }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }
