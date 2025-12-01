@@ -97,27 +97,55 @@ export class OpenCodeSDKService {
 
     /**
      * Get Anthropic API key from VS Code settings or environment variable
+     * Priority: VS Code User Settings > Environment Variable
+     * This ensures users can update the key in settings and it takes effect immediately
      */
     private getApiKey(): string | undefined {
-        // Try VS Code settings first (more reliable for extension processes)
+        let sourceUsed = '';
+        let finalKey: string | undefined = undefined;
+        
+        // Try VS Code settings first (PRIORITY - allows real-time updates)
         try {
             const config = vscode.workspace.getConfiguration('codoc');
             const settingsKey = config.get<string>('anthropicApiKey');
-            if (settingsKey) {
-                this.log('Using API key from VS Code settings', 'info');
-                return settingsKey;
+            
+            if (settingsKey && settingsKey.trim().length > 0) {
+                finalKey = settingsKey.trim();
+                sourceUsed = 'VS Code User Settings';
+                
+                const keyLength = finalKey.length;
+                const keyPreview = keyLength > 10 
+                    ? `${finalKey.substring(0, 8)}...${finalKey.substring(keyLength - 4)}`
+                    : '(short key)';
+                this.log(`✓ Using API key from ${sourceUsed} (length: ${keyLength}, preview: ${keyPreview})`, 'success');
+                this.log(`Full API key value: "${finalKey}"`, 'info');
+                return finalKey;
             }
         } catch (error) {
-            this.log('Could not read from VS Code settings', 'info');
+            this.log(`⚠ Could not read from VS Code settings: ${error}`, 'info');
         }
-
-        // Fallback to environment variable
+        
+        // Only fallback to environment variable if VS Code settings is empty
+        this.log('⚠ API key not found in VS Code settings, checking environment variable...', 'info');
         const envKey = process.env.ANTHROPIC_API_KEY;
-        if (envKey) {
-            this.log('Using API key from environment variable', 'info');
-            return envKey;
+        if (envKey && envKey.trim().length > 0) {
+            finalKey = envKey.trim();
+            sourceUsed = 'Environment Variable (ANTHROPIC_API_KEY)';
+            
+            const keyLength = finalKey.length;
+            const keyPreview = keyLength > 10 
+                ? `${finalKey.substring(0, 8)}...${finalKey.substring(keyLength - 4)}`
+                : '(short key)';
+            this.log(`⚠ Using API key from ${sourceUsed} (length: ${keyLength}, preview: ${keyPreview})`, 'info');
+            this.log(`Note: To use VS Code settings instead, open Settings (Cmd+,) and set codoc.anthropicApiKey`, 'info');
+            return finalKey;
         }
 
+        this.log('❌ No API key found in VS Code settings or environment variables!', 'error');
+        this.log('Please configure your Anthropic API key in VS Code Settings:', 'error');
+        this.log('  1. Press Cmd+, to open VS Code Settings', 'error');
+        this.log('  2. Search for "codoc.anthropicApiKey"', 'error');
+        this.log('  3. Paste your API key from https://console.anthropic.com/keys', 'error');
         return undefined;
     }
 
@@ -183,7 +211,9 @@ export class OpenCodeSDKService {
             if (!apiKey) {
                 throw new Error('API key not found - cannot initialize Claude Agent SDK');
             }
+            this.log(`Setting ANTHROPIC_API_KEY environment variable (length: ${apiKey.length})`, 'info');
             process.env.ANTHROPIC_API_KEY = apiKey; // Set for SDK to use
+            this.log(`Environment variable set. About to call query() with apiKey configured`, 'info');
 
             // Use Claude Agent SDK query function with Claude Code system prompt for automatic planning
             // This enables Claude to automatically: plan → read files → edit → diff → summarize

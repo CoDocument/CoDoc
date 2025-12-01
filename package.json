@@ -35,6 +35,10 @@
       {
         "command": "codoc.generateWithOpenCode",
         "title": "CoDoc: Generate with OpenCode"
+      },
+      {
+        "command": "codoc.configureApiKeys",
+        "title": "CoDoc: Configure API Keys"
       }
     ],
     "menus": {
@@ -78,12 +82,14 @@
           "type": "string",
           "default": "",
           "description": "Anthropic Claude API key for code generation with Claude Agent SDK",
+          "scope": "machine-overridable",
           "order": 1
         },
         "codoc.openaiApiKey": {
           "type": "string",
           "default": "",
           "description": "OpenAI API key for impact analysis and code generation features",
+          "scope": "machine-overridable",
           "order": 2
         },
         "codoc.autoSync": {

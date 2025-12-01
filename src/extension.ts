@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { CodocEditorProvider } from './providers/CodocEditorProvider.js';
 import { AnalysisEngine } from './services/AnalysisEngine.js';
+import { ConfigManager } from './services/ConfigManager.js';
 // import { openCodeService } from './services/OpenCodeService.js';
 
 let editorProvider: CodocEditorProvider;
@@ -64,6 +65,12 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codoc.configureApiKeys', async () => {
+      await ConfigManager.openApiKeySettings();
+    })
+  );
+
   // Register language configuration
   vscode.languages.setLanguageConfiguration('codoc', {
     comments: {
@@ -75,6 +82,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Setup file watcher for auto-sync
   setupAutoSync();
+
+  // Check for API keys in workspace settings and prompt migration
+  ConfigManager.promptForMigration();
 }
 
 export function deactivate() {
