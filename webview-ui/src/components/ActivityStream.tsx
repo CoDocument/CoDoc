@@ -127,11 +127,12 @@ export const ActivityStream: React.FC<ActivityStreamProps> = ({
     <div 
       style={{
         position: 'relative',
-        borderTop: '1px solid var(--vscode-panel-border)',
-        backgroundColor: 'var(--vscode-editor-background)',
+        borderTop: '1px solid #333333',
+        backgroundColor: '#000000',
         maxHeight: isExpanded ? '200px' : '80px',
         overflow: 'hidden',
-        transition: 'max-height 0.2s ease-out'
+        transition: 'max-height 0.2s ease-out',
+        color: '#d4d4d4'
       }}
     >
       {/* Gradient fade at top */}
@@ -142,7 +143,7 @@ export const ActivityStream: React.FC<ActivityStreamProps> = ({
           left: 0,
           right: 0,
           height: '20px',
-          background: 'linear-gradient(to bottom, var(--vscode-editor-background), transparent)',
+          background: 'linear-gradient(to bottom, #000000, transparent)',
           pointerEvents: 'none',
           zIndex: 1,
           opacity: visibleActivities.length > 2 ? 1 : 0
@@ -197,7 +198,7 @@ export const ActivityStream: React.FC<ActivityStreamProps> = ({
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
-                  color: 'var(--vscode-foreground)'
+                  color: '#d4d4d4'
                 }}
                 title={activity.message}
               >
@@ -239,9 +240,9 @@ export const ActivityStream: React.FC<ActivityStreamProps> = ({
             position: 'absolute',
             bottom: '2px',
             right: '4px',
-            background: 'none',
+            background: '#0e6eb8',
             border: 'none',
-            color: 'var(--vscode-textLink-foreground)',
+            color: '#ffffff',
             fontSize: '10px',
             cursor: 'pointer',
             padding: '2px 4px',

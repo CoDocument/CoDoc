@@ -118,21 +118,23 @@ class FeedforwardLineWidget extends WidgetType {
       container.style.display = 'none';
     }
     
+    // Dark mode: black background with gray text
+    container.style.backgroundColor = '#000000';
+    container.style.color = '#808080';
+    container.style.borderLeft = '3px solid #333333';
+    
     if (this.isAccepted) {
-      container.style.backgroundColor = 'rgba(34, 197, 94, 0.2)';
-      container.style.borderLeft = '3px solid rgba(34, 197, 94, 0.6)';
+      container.style.borderLeft = '3px solid #666666';
       container.style.opacity = '0.7';
     } else if (this.isHighlighted) {
-      container.style.backgroundColor = 'rgba(14, 165, 233, 0.25)';
-      container.style.borderLeft = '3px solid rgba(14, 165, 233, 0.8)';
-    } else {
-      container.style.backgroundColor = 'rgba(156, 163, 175, 0.15)';
-      container.style.borderLeft = '3px solid rgba(156, 163, 175, 0.4)';
+      container.style.borderLeft = '3px solid #555555';
     }
 
     const indent = '  '.repeat(Math.max(0, this.suggestion.indentLevel));
     const code = document.createElement('pre');
     code.className = 'cm-feedforwardSuggestionCode';
+    code.style.color = '#808080';
+    code.style.backgroundColor = '#000000';
     code.textContent = indent + this.suggestion.text.trim();
     container.appendChild(code);
 
@@ -457,7 +459,7 @@ const feedforwardPlugin = ViewPlugin.fromClass(
 );
 
 /**
- * Theme for feedforward suggestions
+ * Theme for feedforward suggestions - Dark mode with black background and gray text
  */
 const feedforwardTheme = EditorView.baseTheme({
   ".cm-feedforwardSuggestion": {
@@ -467,17 +469,22 @@ const feedforwardTheme = EditorView.baseTheme({
     fontFamily: "inherit",
     fontSize: "0.95em",
     lineHeight: "1.3",
-    color: "inherit",
+    color: "#808080",
+    backgroundColor: "#000000",
+    border: "1px solid #333333",
     position: "relative",
     transition: "all 0.2s ease"
   },
   ".cm-feedforwardSuggestionCode": {
     margin: "0",
     whiteSpace: "pre",
-    fontFamily: "inherit"
+    fontFamily: "inherit",
+    color: "#808080",
+    backgroundColor: "#000000"
   },
   "&dark .cm-feedforwardSuggestion": {
-    color: "rgba(209, 213, 219, 0.9)"
+    color: "#808080",
+    backgroundColor: "#000000"
   }
 });
 
