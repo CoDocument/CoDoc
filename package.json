@@ -1,7 +1,7 @@
 {
   "name": "codoc",
   "displayName": "CoDoc - Intelligent Code Documentation",
-  "description": "Lightweight CODOC editor with OpenCode integration and dependency-aware code generation",
+  "description": "Lightweight CODOC editor with OpenCode and Claude Agent SDK integration for dependency-aware code generation",
   "version": "0.1.0",
   "publisher": "codoc",
   "type": "module",
@@ -34,7 +34,32 @@
       },
       {
         "command": "codoc.generateWithOpenCode",
-        "title": "CoDoc: Generate with OpenCode"
+        "title": "CoDoc: Generate Code"
+      },
+      {
+        "command": "codoc.openCodeInstall",
+        "title": "CoDoc: Install OpenCode CLI",
+        "description": "Run: npm install -g opencode-ai"
+      },
+      {
+        "command": "codoc.openCodeAuth",
+        "title": "CoDoc: Login to OpenCode",
+        "description": "Run: opencode auth login"
+      },
+      {
+        "command": "codoc.openCodeServe",
+        "title": "CoDoc: Start OpenCode Server",
+        "description": "Run: opencode serve -p 4096 --hostname 127.0.0.1"
+      },
+      {
+        "command": "codoc.setupOpenCode",
+        "title": "CoDoc: Setup OpenCode SDK",
+        "description": "Guide through OpenCode SDK setup (npm install, auth, serve)"
+      },
+      {
+        "command": "codoc.setupClaude",
+        "title": "CoDoc: Setup Claude Agent SDK",
+        "description": "Open settings to configure Claude API key"
       },
       {
         "command": "codoc.configureApiKeys",
@@ -75,31 +100,92 @@
         "priority": "default"
       }
     ],
-    "configuration": {
-      "title": "CoDoc",
-      "properties": {
-        "codoc.anthropicApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Anthropic Claude API key for code generation with Claude Agent SDK",
-          "scope": "machine-overridable",
-          "order": 1
-        },
-        "codoc.openaiApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "OpenAI API key for impact analysis and code generation features",
-          "scope": "machine-overridable",
-          "order": 2
-        },
-        "codoc.autoSync": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically sync CoDoc file with codebase changes",
-          "order": 3
+    "configuration": [
+      {
+        "title": "SDK Provider Selection",
+        "properties": {
+          "codoc.sdkProvider": {
+            "type": "string",
+            "enum": ["opencode", "claude"],
+            "enumDescriptions": [
+              "Use OpenCode SDK (requires local server setup with 'opencode serve')",
+              "Use Claude Agent SDK (requires Anthropic API key)"
+            ],
+            "default": "claude",
+            "description": "Select the SDK provider for code generation",
+            "scope": "machine-overridable",
+            "order": 0
+          }
+        }
+      },
+      {
+        "title": "OpenCode SDK Setup",
+        "properties": {
+          "codoc.openCodeSetupStep1": {
+            "type": "boolean",
+            "default": false,
+            "description": "Step 1: Install OpenCode CLI globally (npm install -g opencode-ai)",
+            "scope": "machine-overridable",
+            "markdownDescription": "**Step 1: Install OpenCode CLI** - Run `npm install -g opencode-ai` in your terminal\n[Click to run in terminal](command:codoc.openCodeInstall)",
+            "order": 1
+          },
+          "codoc.openCodeSetupStep2": {
+            "type": "boolean",
+            "default": false,
+            "description": "Step 2: Login to OpenCode (opencode auth login) - Complete authentication in terminal",
+            "scope": "machine-overridable",
+            "markdownDescription": "**Step 2: OpenCode Authentication** - Run `opencode auth login` in terminal to login\n[Click to run in terminal](command:codoc.openCodeAuth)",
+            "order": 2
+          },
+          "codoc.openCodeSetupStep3": {
+            "type": "boolean",
+            "default": false,
+            "description": "Step 3: Start OpenCode server (opencode serve -p 4096 --hostname 127.0.0.1)",
+            "scope": "machine-overridable",
+            "markdownDescription": "**Step 3: Start OpenCode Server** - Run `opencode serve -p 4096 --hostname 127.0.0.1` in terminal\n[Click to run in terminal](command:codoc.openCodeServe)",
+            "order": 3
+          },
+          "codoc.openCodeServerUrl": {
+            "type": "string",
+            "default": "http://127.0.0.1:4096",
+            "description": "OpenCode server URL (auto-configured after setup)",
+            "scope": "machine-overridable",
+            "order": 4
+          }
+        }
+      },
+      {
+        "title": "Claude Agent SDK Setup",
+        "properties": {
+          "codoc.claudeApiKey": {
+            "type": "string",
+            "default": "",
+            "description": "Anthropic Claude API key for Claude Agent SDK",
+            "scope": "machine-overridable",
+            "markdownDescription": "**Claude API Key** - Paste your Anthropic API key here\n\nGet your key from: https://console.anthropic.com/keys",
+            "order": 1
+          }
+        }
+      },
+      {
+        "title": "Other Settings",
+        "properties": {
+          "codoc.openaiApiKey": {
+            "type": "string",
+            "default": "",
+            "description": "OpenAI API key for impact analysis and code generation features",
+            "scope": "machine-overridable",
+            "order": 1
+          },
+          "codoc.autoSync": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically sync CoDoc file with codebase changes",
+            "order": 2
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

@@ -11,7 +11,7 @@
  */
 
 import * as vscode from 'vscode';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { createOpencodeClient } from '@opencode-ai/sdk';
 import { 
     ActivityEvent, 
     ActivityEventCallbacks, 
@@ -26,6 +26,8 @@ import {
     createActivityMessage
 } from './ActivityEventTypes.js';
 import { FileDiff } from '../../types.js';
+
+type OpencodeClient = any;
 
 export interface GenerationProgress {
     stage: 'starting' | 'thinking' | 'editing' | 'executing' | 'complete' | 'error';
@@ -47,16 +49,15 @@ export interface FileChangeEvent {
 }
 
 export class OpenCodeSDKService {
+    private client: OpencodeClient | null = null;
     private outputChannel: vscode.OutputChannel;
-    private currentQuery: any = null;
+    private currentSessionId: string | null = null;
+    private isServerRunning: boolean = false;
     
     // Activity event tracking
     private activityCallbacks: ActivityEventCallbacks | null = null;
     private thinkingBuffer: Map<string, string> = new Map(); // messageId -> accumulated text
     private lastSummary: ParsedSummaryEvent | null = null;
-    
-    // Session management
-    private currentSessionId: string | null = null;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel('OpenCode Activity');
@@ -77,111 +78,67 @@ export class OpenCodeSDKService {
     }
 
     /**
-     * Initialize Claude Agent SDK (no server required)
+     * Initialize OpenCode client
      */
     async initialize(): Promise<boolean> {
+        if (this.client) {
+            return true;
+        }
+
         try {
-            // Try to get API key from VS Code settings first, then fallback to environment variable
-            const apiKey = this.getApiKey();
-            if (!apiKey) {
-                this.log('ANTHROPIC_API_KEY not configured', 'error');
-                return false;
-            }
-            this.log('Claude Agent SDK initialized', 'success');
+            this.client = createOpencodeClient({
+                baseUrl: 'http://127.0.0.1:4096'
+            });
+
+            // Test connection
+            await this.testConnection();
+            this.isServerRunning = true;
             return true;
         } catch (error) {
-            this.log(`Failed to initialize Claude Agent SDK: ${error}`, 'error');
+            this.log(`Failed to connect to OpenCode server: ${error}`, 'error');
             return false;
         }
     }
 
     /**
-     * Get Anthropic API key from VS Code settings or environment variable
-     * Priority: VS Code User Settings > Environment Variable
-     * This ensures users can update the key in settings and it takes effect immediately
+     * Test if OpenCode server is accessible
      */
-    private getApiKey(): string | undefined {
-        let sourceUsed = '';
-        let finalKey: string | undefined = undefined;
-        
-        // Try VS Code settings first (PRIORITY - allows real-time updates)
-        try {
-            const config = vscode.workspace.getConfiguration('codoc');
-            const settingsKey = config.get<string>('anthropicApiKey');
-            
-            if (settingsKey && settingsKey.trim().length > 0) {
-                finalKey = settingsKey.trim();
-                sourceUsed = 'VS Code User Settings';
-                
-                const keyLength = finalKey.length;
-                const keyPreview = keyLength > 10 
-                    ? `${finalKey.substring(0, 8)}...${finalKey.substring(keyLength - 4)}`
-                    : '(short key)';
-                this.log(`✓ Using API key from ${sourceUsed} (length: ${keyLength}, preview: ${keyPreview})`, 'success');
-                this.log(`Full API key value: "${finalKey}"`, 'info');
-                return finalKey;
-            }
-        } catch (error) {
-            this.log(`⚠ Could not read from VS Code settings: ${error}`, 'info');
-        }
-        
-        // Only fallback to environment variable if VS Code settings is empty
-        this.log('⚠ API key not found in VS Code settings, checking environment variable...', 'info');
-        const envKey = process.env.ANTHROPIC_API_KEY;
-        if (envKey && envKey.trim().length > 0) {
-            finalKey = envKey.trim();
-            sourceUsed = 'Environment Variable (ANTHROPIC_API_KEY)';
-            
-            const keyLength = finalKey.length;
-            const keyPreview = keyLength > 10 
-                ? `${finalKey.substring(0, 8)}...${finalKey.substring(keyLength - 4)}`
-                : '(short key)';
-            this.log(`⚠ Using API key from ${sourceUsed} (length: ${keyLength}, preview: ${keyPreview})`, 'info');
-            this.log(`Note: To use VS Code settings instead, open Settings (Cmd+,) and set codoc.anthropicApiKey`, 'info');
-            return finalKey;
+    private async testConnection(): Promise<void> {
+        if (!this.client) {
+            throw new Error('Client not initialized');
         }
 
-        this.log('❌ No API key found in VS Code settings or environment variables!', 'error');
-        this.log('Please configure your Anthropic API key in VS Code Settings:', 'error');
-        this.log('  1. Press Cmd+, to open VS Code Settings', 'error');
-        this.log('  2. Search for "codoc.anthropicApiKey"', 'error');
-        this.log('  3. Paste your API key from https://console.anthropic.com/keys', 'error');
-        return undefined;
+        try {
+            // Try to get current path as a connection test
+            await this.client.path.get();
+        } catch (error) {
+            throw new Error(`OpenCode server not responding. Please run 'opencode serve' first.`);
+        }
     }
 
     /**
-     * Ensure Claude Agent SDK is configured
+     * Ensure server is running, show helpful error if not
      */
     async ensureServerRunning(): Promise<boolean> {
-        const initialized = await this.initialize();
-        if (!initialized) {
-            const action = await vscode.window.showErrorMessage(
-                'Claude Agent SDK not configured. Please set your Anthropic API key.',
-                'Open Settings',
-                'Show Instructions',
-                'Cancel'
-            );
+        if (!this.isServerRunning) {
+            const connected = await this.initialize();
+            if (!connected) {
+                const action = await vscode.window.showErrorMessage(
+                    'OpenCode server is not running. Please start it with "opencode serve" in your terminal.',
+                    'Show Instructions',
+                    'Cancel'
+                );
 
-            if (action === 'Open Settings') {
-                // Open the VS Code settings UI to the codoc.anthropicApiKey setting
-                await vscode.commands.executeCommand('workbench.action.openSettings', 'codoc.anthropicApiKey');
-            } else if (action === 'Show Instructions') {
-                this.outputChannel.show();
-                this.outputChannel.appendLine('=== Claude Agent SDK Setup ===');
-                this.outputChannel.appendLine('');
-                this.outputChannel.appendLine('Option 1: VS Code Settings (Recommended)');
-                this.outputChannel.appendLine('  1. Open VS Code Settings (Cmd+,)');
-                this.outputChannel.appendLine('  2. Search for "codoc.anthropicApiKey"');
-                this.outputChannel.appendLine('  3. Paste your API key from https://console.anthropic.com');
-                this.outputChannel.appendLine('  4. Click the Generate button again');
-                this.outputChannel.appendLine('');
-                this.outputChannel.appendLine('Option 2: Environment Variable');
-                this.outputChannel.appendLine('  1. Get an API key from https://console.anthropic.com');
-                this.outputChannel.appendLine('  2. Run: export ANTHROPIC_API_KEY=sk-ant-xxxxx...');
-                this.outputChannel.appendLine('  3. Restart VS Code');
-                this.outputChannel.appendLine('  4. Try generating code again');
+                if (action === 'Show Instructions') {
+                    this.outputChannel.show();
+                    this.outputChannel.appendLine('=== OpenCode Server Setup ===');
+                    this.outputChannel.appendLine('1. Open a terminal in your project root');
+                    this.outputChannel.appendLine('2. Run: opencode serve -p 4096 127.0.0.1');
+                    this.outputChannel.appendLine('3. Wait for server to start');
+                    this.outputChannel.appendLine('4. Try generating code again');
+                }
+                return false;
             }
-            return false;
         }
         return true;
     }
@@ -196,58 +153,46 @@ export class OpenCodeSDKService {
         onFileChange: (change: FileChangeEvent) => void
     ): Promise<{ success: boolean; error?: string }> {
         if (!await this.ensureServerRunning()) {
-            return { success: false, error: 'Claude Agent SDK not configured' };
+            return { success: false, error: 'OpenCode server not running' };
+        }
+
+        if (!this.client) {
+            return { success: false, error: 'Client not initialized' };
         }
 
         try {
             this.outputChannel.show(true);
             onProgress({ stage: 'starting', message: 'Initializing generation...' });
 
-            this.log(`Starting generation with Claude Agent SDK`, 'info');
-            onProgress({ stage: 'thinking', message: 'Claude is processing your request...' });
-
-            // Ensure API key is set in environment for Claude Agent SDK
-            const apiKey = this.getApiKey();
-            if (!apiKey) {
-                throw new Error('API key not found - cannot initialize Claude Agent SDK');
-            }
-            this.log(`Setting ANTHROPIC_API_KEY environment variable (length: ${apiKey.length})`, 'info');
-            process.env.ANTHROPIC_API_KEY = apiKey; // Set for SDK to use
-            this.log(`Environment variable set. About to call query() with apiKey configured`, 'info');
-
-            // Use Claude Agent SDK query function with Claude Code system prompt for automatic planning
-            // This enables Claude to automatically: plan → read files → edit → diff → summarize
-            const messageStream = query({
-                prompt,
-                options: {
-                    model: 'claude-haiku-4-5', // Use Claude Haiku 4.5 for faster, cost-effective generation
-                    cwd: workDir,
-                    // Resume session if available to preserve context
-                    ...(this.currentSessionId ? { resume: this.currentSessionId } : {}),
-                    // Allow all available tools for maximum flexibility
-                    // Claude will use: Read, Write, Edit, MultiEdit, Bash, Glob, Grep, Search, WebFetch, WebSearch, and more
-                    // Note: not specifying allowedTools allows all tools by default
-                    // permissionMode options: 'default' (ask before each action), 
-                    // 'acceptEdits' (auto-accept file edits), 'bypassPermissions' (auto-accept all)
-                    permissionMode: 'acceptEdits', // Auto-accept file edits for streamlined workflow
-                    // Load Claude Code system prompt to enable automatic planning and multi-step tool use
-                    // This makes Claude behave like Claude Code desktop: auto-plan, auto-read, auto-edit, auto-diff
-                    systemPrompt: {
-                        type: 'preset',
-                        preset: 'claude_code',
-                        // Append user prompt context to system prompt for complete task definition
-                        // This ensures Claude understands the full scope of what needs to be done
-                        append: `\n\nTASK CONTEXT:\n${prompt}\n\nBased on the above task, automatically plan, execute, and complete all necessary changes.`
-                    }
+            // Create a new session
+            const sessionResponse = await this.client.session.create({
+                body: {
+                    title: 'CoDoc Generation'
                 }
             });
+
+            this.currentSessionId = sessionResponse.data.id;
+            this.log(`Session created: ${this.currentSessionId}`, 'info');
+            // const config = await this.client.config.get();
+            // const { providers, default: defaults } = await this.client.config.providers();
+
+            const eventSubscription = await this.client.event.subscribe();            
+            this.processEventsStream(eventSubscription.stream, onProgress, onFileChange);
             
-            this.currentQuery = messageStream;
+            const messageResponse = await this.client.session.prompt({
+                path: { id: this.currentSessionId },
+                body: {
+                    parts: [{ type: 'text', text: prompt }]
+                }
+            });
 
-            // Process streaming messages
-            await this.processEventsStream(messageStream, onProgress, onFileChange);
+            if (!messageResponse.data) {
+                throw new Error('Failed to send message');
+            }
 
-            this.log(`Generation completed successfully`, 'success');
+            this.log(`Message sent successfully (ID: ${messageResponse.data.id})`, 'success');
+            onProgress({ stage: 'thinking', message: 'AI is processing your request...' });
+
             return { success: true };
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
@@ -258,8 +203,15 @@ export class OpenCodeSDKService {
     }
 
     /**
-     * Process Claude Agent SDK message stream in real-time
-     * Mirrors OpenCode behavior: routes to typed event handlers using switch pattern
+     * Process server-sent events stream in real-time
+     * FOCUSED ON KEY EVENTS ONLY:
+     * 1. message.part.updated (tool=edit) - File edits
+     * 2. message.part.updated (tool=read) - File reads
+     * 3. message.part.updated (type=text) - AI reasoning/thinking
+     * 4. file.edited - File was edited
+     * 5. session.diff - Finalized diffs
+     * 6. message.updated - Final summary with diffs
+     * 7. session.idle - Generation complete
      */
     private async processEventsStream(
         stream: AsyncIterable<any>,
@@ -267,211 +219,93 @@ export class OpenCodeSDKService {
         onFileChange: (change: FileChangeEvent) => void
     ): Promise<void> {
         try {
-            const fileChanges: Set<string> = new Set();
-            const toolTracker: Map<string, any> = new Map(); // Track tool_use by id
-            const editDiffs: FileDiff[] = []; // Aggregate diffs from all edit tools
-            let hasProcessedMessages = false;
+            for await (const event of stream) {
+                const eventType = event.type;
+                const props = event.properties || {};
 
-            for await (const message of stream) {
-                hasProcessedMessages = true;
-                const type = message.type;
+                switch (eventType) {
+                    // =====================
+                    // KEY EVENT 1: EDIT TOOL
+                    // =====================
+                    case 'message.part.updated':
+                        this.handleMessagePartUpdated(props, onProgress, onFileChange);
+                        break;
 
-                // =====================
-                // ROUTE TO EVENT HANDLERS
-                // =====================
-                
-                // Log message type for debugging
-                this.log(`Processing message type: ${type}`, 'info');
-                
-                // Handle result messages (success or error completion)
-                if (type === 'result') {
-                    const subtype = (message as any).subtype;
-                    if (subtype === 'success') {
-                        this.log(`Generation completed with success`, 'success');
-                    } else if (subtype?.includes('error')) {
-                        const errors = (message as any).errors || [];
-                        const errorMsg = errors.length > 0 ? errors[0] : 'Unknown error during generation';
-                        this.log(`Generation error (${subtype}): ${errorMsg}`, 'error');
-                        throw new Error(`Generation failed: ${errorMsg}`);
-                    }
-                    // Result message ends the stream - exit loop
-                    return;
-                }
-                
-                // Handle assistant messages (contains tool uses and text from Claude)
-                if (type === 'assistant') {
-                    const apiMessage = (message as any).message;
-                    if (apiMessage && apiMessage.content) {
-                        const content = Array.isArray(apiMessage.content) ? apiMessage.content : [];
-                        this.log(`Processing assistant message with ${content.length} content blocks`, 'info');
-                        
-                        for (const block of content) {
-                            if (!block) continue;
-                            
-                            const blockType = block.type;
-                            this.log(`  - Content block type: ${blockType}`, 'info');
-                            
-                            // Handle tool_use blocks (file edits, reads, etc)
-                            if (blockType === 'tool_use') {
-                                const toolId = block.id || '';
-                                const toolName = block.name || '';
-                                const input = block.input || {};
-                                
-                                this.log(`    Tool: ${toolName} (id: ${toolId})`, 'info');
-                                
-                                // Track this tool use
-                                toolTracker.set(toolId, { toolName, input, status: 'pending' });
-                                
-                                // Handle pending state
-                                this.handleMessagePartUpdated({
-                                    part: { id: toolId, type: 'tool', tool: toolName.toLowerCase() },
-                                    state: { status: 'pending', input }
-                                }, onProgress, onFileChange, toolTracker, fileChanges);
-                                
-                                // Transition to running state
-                                toolTracker.get(toolId).status = 'running';
-                                this.handleMessagePartUpdated({
-                                    part: { id: toolId, type: 'tool', tool: toolName.toLowerCase() },
-                                    state: { status: 'running', input }
-                                }, onProgress, onFileChange, toolTracker, fileChanges);
-                                
-                                // Mark as completed (since we don't have separate tool_result in this message)
-                                toolTracker.get(toolId).status = 'completed';
-                                this.handleMessagePartUpdated({
-                                    part: { id: toolId, type: 'tool', tool: toolName.toLowerCase() },
-                                    state: { status: 'completed', input }
-                                }, onProgress, onFileChange, toolTracker, fileChanges);
-                                
-                                // Track file changes
-                                if ((toolName.toLowerCase() === 'edit' || toolName.toLowerCase() === 'multiedit') && input?.path) {
-                                    fileChanges.add(input.path);
-                                    editDiffs.push({
-                                        file: input.path,
-                                        before: '',
-                                        after: '',
-                                        additions: 1,
-                                        deletions: 0
-                                    });
-                                    this.log(`    File modified: ${input.path}`, 'info');
-                                }
-                            }
-                            // Handle text blocks (reasoning)
-                            else if (blockType === 'text') {
-                                this.log(`    Text: ${(block.text || '').substring(0, 50)}...`, 'info');
-                                this.handleMessagePartUpdated(
-                                    { part: block, state: {} },
-                                    onProgress,
-                                    onFileChange,
-                                    toolTracker,
-                                    fileChanges
-                                );
-                            }
-                        }
-                    }
-                }
-                
-                // Handle system messages (session initialization, status, etc)
-                if (type === 'system') {
-                    const subtype = (message as any).subtype;
-                    if (subtype === 'init' && (message as any).session_id) {
-                        const props = { sessionId: (message as any).session_id };
+                    // =====================
+                    // KEY EVENT 2: FILE EDITED
+                    // =====================
+                    case 'file.edited':
+                        this.handleFileEdited(props, onFileChange);
+                        break;
+
+                    // =====================
+                    // KEY EVENT 3: SESSION DIFF
+                    // =====================
+                    case 'session.diff':
+                        this.handleSessionDiff(props, onProgress);
+                        break;
+
+                    // =====================
+                    // KEY EVENT 4: FINAL SUMMARY
+                    // =====================
+                    case 'message.updated':
+                        this.handleMessageUpdated(props, onProgress);
+                        break;
+
+                    // =====================
+                    // SESSION STATUS EVENTS
+                    // =====================
+                    case 'session.status':
                         this.handleSessionStatus(props, onProgress);
-                    } else if (subtype === 'status') {
-                        const status = (message as any).status;
-                        if (status) {
-                            this.log(`Session status: ${status}`, 'info');
-                            onProgress({ stage: 'thinking', message: `Processing... (${status})` });
-                        }
-                    } else if (subtype === 'compact_boundary') {
-                        this.log(`Session compacting...`, 'info');
-                    }
-                    // Continue processing other system messages
-                }
-                
-                // Handle tool_progress messages (for real-time progress updates)
-                if (type === 'tool_progress') {
-                    const toolName = (message as any).tool_name || 'unknown';
-                    const elapsed = (message as any).elapsed_time_seconds || 0;
-                    this.log(`Tool progress: ${toolName} (${elapsed}s)`, 'info');
-                    onProgress({ stage: 'editing', message: `Executing ${toolName}...` });
-                }
-            }
+                        break;
 
-            // =====================
-            // GENERATION COMPLETE - Aggregate and emit final events
-            // =====================
-            
-            // Emit aggregated diff summary (session.diff event)
-            if (editDiffs.length > 0) {
-                this.handleSessionDiff(
-                    { diff: editDiffs },
-                    onProgress
-                );
-            }
-            
-            // Emit final summary (message.updated event)
-            if (fileChanges.size > 0) {
-                this.handleMessageUpdated(
-                    {
-                        info: {
+                    case 'session.idle':
+                        onProgress({ stage: 'complete', message: 'Code generation finished!' });
+                        this.emitActivityEvent({
                             id: generateEventId(),
-                            summary: {
-                                title: `${fileChanges.size} files modified`,
-                                body: `Generated changes affecting ${fileChanges.size} file(s)`,
-                                diffs: editDiffs
-                            }
-                        }
-                    },
-                    onProgress
-                );
+                            type: 'complete',
+                            timestamp: Date.now(),
+                            message: 'Complete'
+                        });
+                        this.activityCallbacks?.onComplete();
+                        break;
+
+                    case 'session.error':
+                        const errorMsg = props.error?.data?.message || 'An error occurred';
+                        onProgress({ stage: 'error', message: errorMsg });
+                        this.activityCallbacks?.onError(errorMsg);
+                        break;
+
+                    // Ignore other events
+                    default:
+                        break;
+                }
             }
-            
-            // Emit session idle (stream complete)
-            onProgress({ stage: 'complete', message: 'Code generation finished!' });
-            this.emitActivityEvent({
-                id: generateEventId(),
-                type: 'complete',
-                timestamp: Date.now(),
-                message: 'Complete'
-            });
-            
-            this.activityCallbacks?.onComplete();
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
-            this.log(`Stream processing error: ${errorMsg}`, 'error');
-            onProgress({ stage: 'error', message: errorMsg });
             this.activityCallbacks?.onError(errorMsg);
         }
     }
 
     /**
      * Handle message.part.updated events
-     * Routes to appropriate handler based on part type
+     * This includes: edit tool, read tool, and text (thinking) events
      */
     private handleMessagePartUpdated(
-        props: any,
+        props: any, 
         onProgress: (progress: GenerationProgress) => void,
-        onFileChange: (change: FileChangeEvent) => void,
-        toolTracker?: Map<string, any>,
-        fileChanges?: Set<string>
+        onFileChange: (change: FileChangeEvent) => void
     ): void {
         const part = props.part;
         if (!part) return;
 
         const partType = part.type;
         const tool = part.tool;
-        const state = props.state;
+        const state = part.state;
 
         // EDIT TOOL - File is being edited
-        if (partType === 'tool' && (tool === 'edit' || tool === 'multiedit')) {
+        if (partType === 'tool' && tool === 'edit') {
             this.handleEditTool(part, state, onProgress, onFileChange);
-            // Track file changes on completion
-            if (state?.status === 'completed' && fileChanges) {
-                const filePath = state?.input?.path || state?.input?.filePath || '';
-                if (filePath) {
-                    fileChanges.add(filePath);
-                }
-            }
         }
         // READ TOOL - File is being read
         else if (partType === 'tool' && tool === 'read') {
@@ -479,22 +313,22 @@ export class OpenCodeSDKService {
         }
         // TEXT - AI reasoning/thinking (streaming)
         else if (partType === 'text') {
-            this.handleThinkingText(part, onProgress);
+            this.handleThinkingText(part, props.delta, onProgress);
         }
     }
 
     /**
-     * Handle edit tool state transitions (mirroring OpenCode behavior)
+     * Handle edit tool events
      */
     private handleEditTool(
-        part: any,
+        part: any, 
         state: any,
         onProgress: (progress: GenerationProgress) => void,
         onFileChange: (change: FileChangeEvent) => void
     ): void {
         const status = state?.status;
         const input = state?.input || {};
-        const filePath = input.path || input.filePath || '';
+        const filePath = input.filePath || '';
         const fileName = extractFileName(filePath);
 
         if (status === 'pending') {
@@ -508,7 +342,8 @@ export class OpenCodeSDKService {
                 toolName: 'edit',
                 toolStatus: 'pending'
             });
-        } else if (status === 'running') {
+        }
+        else if (status === 'running') {
             onProgress({ stage: 'editing', message: `Editing ${fileName}...` });
             this.emitActivityEvent({
                 id: part.id,
@@ -520,14 +355,15 @@ export class OpenCodeSDKService {
                 toolName: 'edit',
                 toolStatus: 'running'
             });
-        } else if (status === 'completed') {
+        }
+        else if (status === 'completed') {
             const metadata = state.metadata || {};
             const filediff = metadata.filediff || {};
             const additions = filediff.additions || 0;
             const deletions = filediff.deletions || 0;
 
-            onProgress({
-                stage: 'editing',
+            onProgress({ 
+                stage: 'editing', 
                 message: `Edited ${fileName} (+${additions} -${deletions})`,
                 fileChanges: [filePath]
             });
@@ -546,9 +382,10 @@ export class OpenCodeSDKService {
                 toolStatus: 'completed'
             });
 
+            // Emit gutter decoration
             this.emitGutterDecoration({
                 id: `gutter_${part.id}`,
-                lineNumber: -1,
+                lineNumber: -1, // Will be resolved by matching filePath
                 iconType: 'edit',
                 tooltip: `Edited: +${additions} -${deletions}`,
                 filePath,
@@ -556,6 +393,7 @@ export class OpenCodeSDKService {
                 deletions
             });
 
+            // Trigger file change callback
             onFileChange({
                 path: filePath,
                 type: 'modified',
@@ -565,16 +403,16 @@ export class OpenCodeSDKService {
     }
 
     /**
-     * Handle read tool state transitions (mirroring OpenCode behavior)
+     * Handle read tool events
      */
     private handleReadTool(
-        part: any,
+        part: any, 
         state: any,
         onProgress: (progress: GenerationProgress) => void
     ): void {
         const status = state?.status;
         const input = state?.input || {};
-        const filePath = input.path || input.filePath || '';
+        const filePath = input.filePath || '';
         const fileName = extractFileName(filePath);
 
         if (status === 'running' || status === 'pending') {
@@ -589,7 +427,8 @@ export class OpenCodeSDKService {
                 toolName: 'read',
                 toolStatus: status
             });
-        } else if (status === 'completed') {
+        }
+        else if (status === 'completed') {
             this.emitActivityEvent({
                 id: part.id,
                 type: 'reading',
@@ -601,6 +440,7 @@ export class OpenCodeSDKService {
                 toolStatus: 'completed'
             });
 
+            // Emit gutter decoration for read
             this.emitGutterDecoration({
                 id: `gutter_${part.id}`,
                 lineNumber: -1,
@@ -612,29 +452,30 @@ export class OpenCodeSDKService {
     }
 
     /**
-     * Handle thinking/reasoning text (mirroring OpenCode behavior)
+     * Handle streaming text (AI thinking/reasoning)
      */
     private handleThinkingText(
-        part: any,
+        part: any, 
+        delta: string | undefined,
         onProgress: (progress: GenerationProgress) => void
     ): void {
+        const messageId = part.messageID;
         const currentText = part.text || '';
-        const partId = part.id || `thinking_${Date.now()}`;
 
         // Accumulate text for this message
-        this.thinkingBuffer.set(partId, currentText);
+        this.thinkingBuffer.set(messageId, currentText);
 
         // Only emit if we have meaningful content
         if (currentText.length > 10) {
-            const truncated = currentText.length > 60
-                ? currentText.slice(0, 57) + '...'
+            const truncated = currentText.length > 60 
+                ? currentText.slice(0, 57) + '...' 
                 : currentText;
 
             onProgress({ stage: 'thinking', message: truncated });
-
-            // Emit activity event
+            
+            // Emit activity event (throttled to avoid spam)
             this.emitActivityEvent({
-                id: partId,
+                id: `thinking_${messageId}`,
                 type: 'thinking',
                 timestamp: Date.now(),
                 message: `Thinking: ${truncated}`,
@@ -644,7 +485,7 @@ export class OpenCodeSDKService {
     }
 
     /**
-     * Handle file.edited events - file write operations
+     * Handle file.edited events
      */
     private handleFileEdited(
         props: any,
@@ -670,7 +511,7 @@ export class OpenCodeSDKService {
     }
 
     /**
-     * Handle session.diff events - aggregated file changes
+     * Handle session.diff events - finalized file changes
      */
     private handleSessionDiff(
         props: any,
@@ -713,21 +554,23 @@ export class OpenCodeSDKService {
             message,
             additions: totalAdditions,
             deletions: totalDeletions,
-            raw: { fileCount: diffs.length }
+            raw: diffs
         });
     }
 
     /**
-     * Handle message.updated events - final generation summary
+     * Handle message.updated events - contains final summary
      */
     private handleMessageUpdated(
         props: any,
         onProgress: (progress: GenerationProgress) => void
     ): void {
         const info = props.info;
-        if (!info || !info.summary) return;
+        if (!info || info.role !== 'user') return;
 
         const summary = info.summary;
+        if (!summary) return;
+
         const parsedSummary: ParsedSummaryEvent = {
             messageId: info.id,
             sessionId: info.sessionID,
@@ -752,30 +595,12 @@ export class OpenCodeSDKService {
             id: generateEventId(),
             type: 'summary',
             timestamp: Date.now(),
-            message: summary.title,
-            details: summary.body
+            message: summary.title || 'Generation complete',
+            details: summary.body,
+            raw: parsedSummary
         });
-    }
 
-    /**
-     * Handle session.status events - session initialization and status updates
-     */
-    private handleSessionStatus(
-        props: any,
-        onProgress: (progress: GenerationProgress) => void
-    ): void {
-        const sessionId = props.sessionId;
-        if (sessionId) {
-            this.currentSessionId = sessionId;
-            this.log(`Session initialized: ${sessionId}`, 'info');
-            this.emitActivityEvent({
-                id: generateEventId(),
-                type: 'complete',
-                timestamp: Date.now(),
-                message: `Session started`,
-                details: sessionId
-            });
-        }
+        this.activityCallbacks?.onSummary(parsedSummary);
     }
 
     /**
@@ -790,6 +615,152 @@ export class OpenCodeSDKService {
      */
     private emitGutterDecoration(decoration: GutterDecoration): void {
         this.activityCallbacks?.onGutterDecoration(decoration);
+    }
+
+    /**
+     * Handle session status updates
+     */
+    private handleSessionStatus(props: any, onProgress: (progress: GenerationProgress) => void): void {
+        const status = props.status?.type || props.type;
+
+        switch (status) {
+            case 'idle':
+                onProgress({ stage: 'complete', message: 'Generation complete!' });
+                break;
+            case 'busy':
+                onProgress({ stage: 'executing', message: 'Working...' });
+                break;
+            case 'retry':
+                onProgress({ stage: 'thinking', message: `Retrying...` });
+                break;
+        }
+    }
+
+    /**
+     * Get session details
+     */
+    async getSessionDetails(sessionId: string): Promise<any> {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+
+        const response = await this.client.session.get({
+            path: { id: sessionId }
+        });
+
+        return response.data;
+    }
+
+    /**
+     * Get session messages
+     */
+    async getSessionMessages(sessionId: string): Promise<any[]> {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+
+        const response = await this.client.session.messages({
+            path: { id: sessionId }
+        });
+
+        return response.data || [];
+    }
+
+    /**
+     * Get file status for tracking changes
+     * Useful for feedback pipeline to detect what files were modified
+     */
+    async getFileStatus(): Promise<any[]> {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+
+        try {
+            const response = await this.client.file.status({});
+            this.log(`File status: ${response.data?.length || 0} tracked files`, 'info');
+            return response.data || [];
+        } catch (error) {
+            this.log(`Failed to get file status: ${error}`, 'error');
+            return [];
+        }
+    }
+
+    /**
+     * Search for files in workspace (useful for CoDoc processing)
+     */
+    async findFiles(pattern: string): Promise<string[]> {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+
+        try {
+            const response = await this.client.find.files({
+                query: { query: pattern }
+            });
+            return response.data || [];
+        } catch (error) {
+            this.log(`Failed to find files: ${error}`, 'error');
+            return [];
+        }
+    }
+
+    /**
+     * Read file content
+     */
+    async readFile(filePath: string): Promise<string | null> {
+        if (!this.client) {
+            throw new Error('Client not initialized');
+        }
+
+        try {
+            const response = await this.client.file.read({
+                query: { path: filePath }
+            });
+            return response.data?.content || null;
+        } catch (error) {
+            this.log(`Failed to read file ${filePath}: ${error}`, 'error');
+            return null;
+        }
+    }
+
+    /**
+     * Abort current generation session
+     */
+    async abortGeneration(): Promise<boolean> {
+        if (!this.client || !this.currentSessionId) {
+            return false;
+        }
+
+        try {
+            this.log('Aborting generation...', 'info');
+            await this.client.session.abort({
+                path: { id: this.currentSessionId }
+            });
+            this.log('Generation aborted successfully', 'success');
+            return true;
+        } catch (error) {
+            this.log(`Failed to abort generation: ${error}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * Get current session status
+     */
+    async getCurrentSessionStatus(): Promise<any> {
+        if (!this.client || !this.currentSessionId) {
+            return null;
+        }
+
+        try {
+            const response = await this.client.session.get({
+                path: { id: this.currentSessionId }
+            });
+            return response.data;
+        } catch (error) {
+            this.log(`Failed to get session status: ${error}`, 'error');
+            return null;
+        }
     }
 
     /**

@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import { AnalysisEngine } from '../services/AnalysisEngine.js';
 import { structuralDiffEngine } from '../services/StructuralDiffEngine.js';
-import { openCodeSDKService } from '../services/agent/OpenCodeSDKService.js';
+import { AgentServiceFactory } from '../services/agent/AgentServiceFactory.js';
 import { impactAnalysisService } from '../services/ImpactAnalysisService.js';
 import { promptPreparationService } from '../services/PromptPreparationService.js';
 import { MockGenerationService } from '../services/agent/MockGenerationService.js';
@@ -98,7 +98,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       }
     };
 
-    openCodeSDKService.setActivityCallbacks(callbacks);
+    AgentServiceFactory.getService().setActivityCallbacks(callbacks);
   }
 
 
@@ -604,17 +604,19 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 ${prompt}`;
       }
       this.isGenerating = true;
-      openCodeSDKService.showOutput();
+      const agentService = AgentServiceFactory.getService();
+      agentService.showOutput();
 
+      const provider = AgentServiceFactory.isOpenCodeSelected() ? 'OpenCode' : 'Claude';
       vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: 'Generating code with OpenCode...',
+        title: `Generating code with ${provider}...`,
         cancellable: false
       }, async (progress) => {
         progress.report({ message: 'Initializing OpenCode...' });
 
         // Generate code with real-time progress tracking
-        const result = await openCodeSDKService.generate(
+        const result = await agentService.generate(
           finalPrompt,
           workDir,
           // Progress callback

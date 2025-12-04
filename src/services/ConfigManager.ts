@@ -1,17 +1,47 @@
 import * as vscode from 'vscode';
 
+export type SDKProvider = 'opencode' | 'claude';
+
 export class ConfigManager {
-  static getAnthropicApiKey(): string {
+  /**
+   * Get the selected SDK provider
+   * Defaults to 'claude' for backwards compatibility
+   */
+  static getSDKProvider(): SDKProvider {
     const config = vscode.workspace.getConfiguration('codoc');
-    const apiKey = config.get<string>('anthropicApiKey', '');
+    const provider = config.get<SDKProvider>('sdkProvider', 'claude');
+    return provider;
+  }
+
+  /**
+   * Set the SDK provider
+   */
+  static async setSDKProvider(provider: SDKProvider): Promise<void> {
+    const config = vscode.workspace.getConfiguration('codoc');
+    await config.update('sdkProvider', provider, vscode.ConfigurationTarget.Global);
+  }
+
+  /**
+   * Get OpenCode server URL
+   */
+  static getOpenCodeServerUrl(): string {
+    const config = vscode.workspace.getConfiguration('codoc');
+    return config.get<string>('openCodeServerUrl', 'http://127.0.0.1:4096');
+  }
+
+  /**
+   * Get Claude API key (alternative to Anthropic API key)
+   */
+  static getClaudeApiKey(): string {
+    const config = vscode.workspace.getConfiguration('codoc');
+    const apiKey = config.get<string>('claudeApiKey', '');
     
     if (!apiKey) {
-      console.warn('Anthropic API key not configured. Please configure it in VS Code settings.');
+      console.warn('Claude API key not configured. Please configure it in VS Code settings.');
     }
     
     return apiKey;
   }
-
 
   static getOpenAiApiKey(): string {
     const config = vscode.workspace.getConfiguration('codoc');
@@ -24,34 +54,50 @@ export class ConfigManager {
     return apiKey;
   }
 
-  static hasAnthropicApiKey(): boolean {
-    return this.getAnthropicApiKey().length > 0;
-  }
-
-
   static hasOpenAiApiKey(): boolean {
     return this.getOpenAiApiKey().length > 0;
   }
 
   static hasAnyApiKey(): boolean {
-    return this.hasAnthropicApiKey() || this.hasOpenAiApiKey();
+    return this.hasClaudeApiKey() || this.hasOpenAiApiKey();
+  }
+
+  /**
+   * Check if the selected SDK provider is OpenCode
+   */
+  static isOpenCodeSelected(): boolean {
+    return this.getSDKProvider() === 'opencode';
+  }
+
+  /**
+   * Check if the selected SDK provider is Claude
+   */
+  static isClaudeSelected(): boolean {
+    return this.getSDKProvider() === 'claude';
+  }
+
+  /**
+   * Check if Claude API key is configured
+   */
+  static hasClaudeApiKey(): boolean {
+    return this.getClaudeApiKey().length > 0;
   }
 
 
   static async openApiKeySettings(): Promise<void> {
-    await vscode.commands.executeCommand('workbench.action.openSettings', 'codoc.anthropicApiKey');
+    await vscode.commands.executeCommand('workbench.action.openSettings', 'codoc.claudeApiKey');
   }
 
   static async promptForMissingApiKeys(): Promise<boolean> {
-    const hasAnthropicKey = this.hasAnthropicApiKey();
+    const hasClaudeKey = this.hasClaudeApiKey();
     const hasOpenAiKey = this.hasOpenAiApiKey();
 
-    if (hasAnthropicKey && hasOpenAiKey) {
+    if (hasClaudeKey && hasOpenAiKey) {
       return true;
     }
 
     const missingKeys: string[] = [];
-    if (!hasAnthropicKey) missingKeys.push('Anthropic API Key');
+    if (!hasClaudeKey) missingKeys.push('Claude API Key');
     if (!hasOpenAiKey) missingKeys.push('OpenAI API Key');
 
     const message = `Missing ${missingKeys.join(' and ')}. Would you like to configure them now?`;
@@ -66,11 +112,11 @@ export class ConfigManager {
   }
 
 
-  static async ensureApiKey(keyType: 'anthropic' | 'openai'): Promise<boolean> {
-    const hasKey = keyType === 'anthropic' ? this.hasAnthropicApiKey() : this.hasOpenAiApiKey();
+  static async ensureApiKey(keyType: 'claude' | 'openai'): Promise<boolean> {
+    const hasKey = keyType === 'claude' ? this.hasClaudeApiKey() : this.hasOpenAiApiKey();
 
     if (!hasKey) {
-      const keyName = keyType === 'anthropic' ? 'Anthropic' : 'OpenAI';
+      const keyName = keyType === 'claude' ? 'Claude' : 'OpenAI';
       const action = await vscode.window.showErrorMessage(
         `${keyName} API key is not configured. Please configure it in VS Code settings.`,
         'Open Settings'
@@ -92,7 +138,7 @@ export class ConfigManager {
     const workspaceConfig = vscode.workspace.getConfiguration();
     
 
-    const workspaceSettings = workspaceConfig.inspect<string>('codoc.anthropicApiKey');
+    const workspaceSettings = workspaceConfig.inspect<string>('codoc.claudeApiKey');
     
     return !!(workspaceSettings?.workspaceValue || workspaceSettings?.workspaceFolderValue);
   }
