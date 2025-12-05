@@ -726,7 +726,7 @@ export class OpenCodeSDKService {
     /**
      * Abort current generation session
      */
-    async abortGeneration(): Promise<boolean> {
+    async stopGeneration(): Promise<boolean> {
         if (!this.client || !this.currentSessionId) {
             return false;
         }
@@ -737,6 +737,7 @@ export class OpenCodeSDKService {
                 path: { id: this.currentSessionId }
             });
             this.log('Generation aborted successfully', 'success');
+            this.currentSessionId = null;
             return true;
         } catch (error) {
             this.log(`Failed to abort generation: ${error}`, 'error');

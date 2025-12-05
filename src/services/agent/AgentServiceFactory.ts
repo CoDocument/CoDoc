@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { ConfigManager } from '../ConfigManager.js';
 import { OpenCodeSDKService } from './OpenCodeSDKService.js';
 import { ClaudeCodeService } from './ClaudeCodeService.js';
+import { ActivityEventCallbacks } from './ActivityEventTypes.js';
 
 export type AgentService = OpenCodeSDKService | ClaudeCodeService;
 
@@ -16,6 +17,7 @@ export type AgentService = OpenCodeSDKService | ClaudeCodeService;
 export class AgentServiceFactory {
   private static instance: AgentService | null = null;
   private static currentProvider: string | null = null;
+  private static lastActivityCallbacks: ActivityEventCallbacks | null = null;
 
   /**
    * Get or create the appropriate service based on current configuration
@@ -42,11 +44,23 @@ export class AgentServiceFactory {
    * Create a new service instance based on the provider type
    */
   private static createService(provider: 'opencode' | 'claude'): AgentService {
-    if (provider === 'opencode') {
-      return new OpenCodeSDKService();
-    } else {
-      return new ClaudeCodeService();
+    const service = provider === 'opencode'
+      ? new OpenCodeSDKService()
+      : new ClaudeCodeService();
+
+    if (this.lastActivityCallbacks) {
+      service.setActivityCallbacks(this.lastActivityCallbacks);
     }
+
+    return service;
+  }
+
+  /**
+   * Store callbacks so new service instances automatically forward activities
+   */
+  static setActivityCallbacks(callbacks: ActivityEventCallbacks): void {
+    this.lastActivityCallbacks = callbacks;
+    this.getService().setActivityCallbacks(callbacks);
   }
 
   /**

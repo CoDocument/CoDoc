@@ -69,9 +69,9 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       },
       onSummary: (summary) => {
         // Show completion notification
-        if (summary.title) {
-          vscode.window.showInformationMessage(`✓ ${summary.title}`);
-        }
+        // if (summary.title) {
+        //   vscode.window.showInformationMessage(`✓ ${summary.title}`);
+        // }
       },
       onComplete: () => {
         webviewPanel.webview.postMessage({
@@ -98,7 +98,7 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
       }
     };
 
-    AgentServiceFactory.getService().setActivityCallbacks(callbacks);
+    AgentServiceFactory.setActivityCallbacks(callbacks);
   }
 
 
@@ -191,6 +191,10 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
           });
         }
         await this.generateCode(message.prompt, message.contextFiles);
+        break;
+
+      case 'stopGeneration':
+        await this.stopGeneration();
         break;
 
       case 'mockGenerateCode':
@@ -326,6 +330,43 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
         content,
         preserveCursor
       });
+    }
+  }
+
+  /**
+   * Stop ongoing code generation
+   */
+  async stopGeneration(): Promise<void> {
+    if (!this.isGenerating) {
+      return;
+    }
+
+    try {
+      const agentService = AgentServiceFactory.getService();
+      const stopped = await agentService.stopGeneration();
+      if (!stopped) {
+        vscode.window.showWarningMessage('Unable to stop the current agent run. Please try again.');
+        return;
+      }
+
+      this.isGenerating = false;
+      
+      // Notify webview that generation has stopped
+      if (this.currentPanel) {
+        this.currentPanel.webview.postMessage({
+          type: 'activityEvent',
+          event: {
+            id: `stop_${Date.now()}`,
+            eventType: 'error',
+            message: 'Generation stopped by user',
+            timestamp: Date.now()
+          }
+        });
+      }
+
+      vscode.window.showInformationMessage('Code generation stopped');
+    } catch (error) {
+      console.error('Error stopping generation:', error);
     }
   }
 
@@ -603,6 +644,19 @@ export class CodocEditorProvider implements vscode.CustomTextEditorProvider {
 
 ${prompt}`;
       }
+      if (this.currentPanel) {
+        this.currentPanel.webview.postMessage({ type: 'clearActivityStream' });
+        this.currentPanel.webview.postMessage({
+          type: 'activityEvent',
+          event: {
+            id: `start_${Date.now()}`,
+            eventType: 'thinking',
+            message: 'Preparing agent session...',
+            timestamp: Date.now()
+          }
+        });
+      }
+
       this.isGenerating = true;
       const agentService = AgentServiceFactory.getService();
       agentService.showOutput();
@@ -790,9 +844,9 @@ ${prompt}`;
         });
       }
 
-      vscode.window.showInformationMessage(
-        `Code generation complete! ${aiChanges.length} AI changes detected.`
-      );
+      // vscode.window.showInformationMessage(
+      //   `Code generation complete! ${aiChanges.length} AI changes detected.`
+      // );
 
       this.isGenerating = false;
     } catch (error) {

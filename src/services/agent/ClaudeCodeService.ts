@@ -11,7 +11,7 @@
  */
 
 import * as vscode from 'vscode';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { 
     ActivityEvent, 
     ActivityEventCallbacks, 
@@ -48,7 +48,7 @@ export interface FileChangeEvent {
 
 export class ClaudeCodeService {
     private outputChannel: vscode.OutputChannel;
-    private currentQuery: any = null;
+    private currentQuery: Query | null = null;
     
     // Activity event tracking
     private activityCallbacks: ActivityEventCallbacks | null = null;
@@ -253,6 +253,8 @@ export class ClaudeCodeService {
             this.log(`Generation failed: ${errorMsg}`, 'error');
             onProgress({ stage: 'error', message: errorMsg });
             return { success: false, error: errorMsg };
+        } finally {
+            this.currentQuery = null;
         }
     }
 
@@ -830,6 +832,34 @@ export class ClaudeCodeService {
      */
     clearOutput(): void {
         this.outputChannel.clear();
+    }
+
+    /**
+     * Interrupt the active Claude Agent query if one is running
+     */
+    async stopGeneration(): Promise<boolean> {
+        if (!this.currentQuery) {
+            return false;
+        }
+
+        try {
+            this.log('Interrupting Claude Agent session...', 'info');
+            if (typeof this.currentQuery.interrupt === 'function') {
+                await this.currentQuery.interrupt();
+            }
+
+            if (typeof this.currentQuery.return === 'function') {
+                await this.currentQuery.return();
+            }
+
+            this.currentQuery = null;
+            this.log('Claude Agent session interrupted successfully', 'success');
+            return true;
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            this.log(`Failed to interrupt Claude Agent session: ${errorMsg}`, 'error');
+            return false;
+        }
     }
 
     /**
