@@ -522,8 +522,57 @@ export const CodocEditor: React.FC = () => {
     }, 300); // 300ms debounce - only trigger after cursor settles
   }, [parsedSchema]);
 
+  // dark theme with black background and gray text
+  const darkTheme = EditorView.theme({
+    '&': {
+      backgroundColor: '#000000',
+      color: '#d4d4d4'
+    },
+    '.cm-content': {
+      backgroundColor: '#000000',
+      color: '#d4d4d4',
+      caretColor: '#d4d4d4'
+    },
+    '.cm-editor': {
+      backgroundColor: '#000000'
+    },
+    '.cm-scroller': {
+      backgroundColor: '#000000'
+    },
+    '.cm-gutters': {
+      backgroundColor: '#000000',
+      borderRight: '1px solid #333333',
+      color: '#999999'
+    },
+    '.cm-lineNumbers .cm-gutterElement': {
+      color: '#999999'
+    },
+    '.cm-activeLineGutter': {
+      backgroundColor: '#1a1a1a'
+    },
+    '.cm-activeLine': {
+      backgroundColor: '#1a1a1a'
+    },
+    '.cm-selectionMatch': {
+      backgroundColor: '#333333'
+    },
+    '.cm-selectionBackground': {
+      backgroundColor: '#333333'
+    },
+    '.cm-cursor': {
+      borderLeftColor: '#d4d4d4'
+    },
+    '.cm-focused .cm-cursor': {
+      borderLeftColor: '#d4d4d4'
+    },
+    '.cm-focused .cm-selectionBackground': {
+      backgroundColor: '#333333'
+    }
+  }, { dark: true });
+
   // Combine all extensions
   const extensions = React.useMemo(() => [
+    darkTheme,                          // Custom dark theme
     fileStructureExtension(),           // Visual structure icons
     codocSyntaxHighlighting(),          // Parser-driven syntax highlighting (lexer.ts)
     ...schemaFoldingExtension(),        // Schema-aware folding
@@ -546,24 +595,25 @@ export const CodocEditor: React.FC = () => {
       display: 'flex', 
       flexDirection: 'column', 
       height: '100vh',
-      backgroundColor: 'var(--vscode-editor-background)',
-      color: 'var(--vscode-editor-background)'
+      backgroundColor: '#000000',
+      color: '#d4d4d4'
     }}>
       {/* Minimal toolbar with just two small buttons */}
       <div style={{ 
         padding: '4px 8px', 
-        borderBottom: '1px solid var(--vscode-panel-border)',
+        borderBottom: '1px solid #333333',
         display: 'flex',
         gap: '8px',
-        alignItems: 'center'
+        alignItems: 'center',
+        backgroundColor: '#000000'
       }}>
         <button 
           onClick={handleSyncCodebase}
           style={{
             padding: '4px 8px',
             fontSize: '12px',
-            backgroundColor: 'var(--vscode-button-background)',
-            color: 'var(--vscode-button-foreground)',
+            backgroundColor: '#0e6eb8',
+            color: '#ffffff',
             border: 'none',
             borderRadius: '2px',
             cursor: 'pointer'
@@ -576,8 +626,8 @@ export const CodocEditor: React.FC = () => {
           style={{
             padding: '4px 8px',
             fontSize: '12px',
-            backgroundColor: 'var(--vscode-button-background)',
-            color: 'var(--vscode-button-foreground)',
+            backgroundColor: '#0e6eb8',
+            color: '#ffffff',
             border: 'none',
             borderRadius: '2px',
             cursor: 'pointer'
@@ -590,8 +640,8 @@ export const CodocEditor: React.FC = () => {
           style={{
             padding: '4px 8px',
             fontSize: '12px',
-            backgroundColor: 'var(--vscode-button-background)',
-            color: 'var(--vscode-button-foreground)',
+            backgroundColor: '#0e6eb8',
+            color: '#ffffff',
             border: 'none',
             borderRadius: '2px',
             cursor: 'pointer'
@@ -605,9 +655,9 @@ export const CodocEditor: React.FC = () => {
           style={{
             padding: '4px 8px',
             fontSize: '12px',
-            backgroundColor: 'var(--vscode-button-secondaryBackground)',
-            color: 'var(--vscode-button-secondaryForeground)',
-            border: '1px solid var(--vscode-button-border)',
+            backgroundColor: '#0e6eb8',
+            color: '#ffffff',
+            border: 'none',
             borderRadius: '2px',
             cursor: 'pointer'
           }}

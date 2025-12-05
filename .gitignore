@@ -16,3 +16,4 @@ webview/dist/
 node_modules/
 
 opencode_logs.json
+webview-ui/build/
