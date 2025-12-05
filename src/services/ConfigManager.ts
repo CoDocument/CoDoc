@@ -5,11 +5,11 @@ export type SDKProvider = 'opencode' | 'claude';
 export class ConfigManager {
   /**
    * Get the selected SDK provider
-   * Defaults to 'claude' for backwards compatibility
+   * Defaults to 'opencode' so OpenCode is the primary experience
    */
   static getSDKProvider(): SDKProvider {
     const config = vscode.workspace.getConfiguration('codoc');
-    const provider = config.get<SDKProvider>('sdkProvider', 'claude');
+    const provider = config.get<SDKProvider>('sdkProvider', 'opencode');
     return provider;
   }
 

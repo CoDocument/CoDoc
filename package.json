@@ -111,7 +111,7 @@
               "Use OpenCode SDK (requires local server setup with 'opencode serve')",
               "Use Claude Agent SDK (requires Anthropic API key)"
             ],
-            "default": "claude",
+            "default": "opencode",
             "description": "Select the SDK provider for code generation",
             "scope": "machine-overridable",
             "order": 0
