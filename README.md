@@ -239,34 +239,57 @@ Related files:
 
 ## 8. Configuration and settings
 
-### Via VS Code Settings UI
+### 8.1 Choose your provider
+
+CoDoc supports two code generation providers. Choose one:
+
+- OpenCode SDK (default): Uses a local OpenCode server. Requires setup (install CLI, auth, start server).
+- Claude Agent SDK: Uses Anthropic Claude API. Requires only an API key.
+
+### 8.2 Setup OpenCode SDK
+
+Via VS Code Settings UI
 
 1. Open VS Code Settings: `Cmd + ,` (macOS) / `Ctrl + ,` (Windows/Linux).
-2. Search `codoc` and click the **CoDoc** section.
-3. Set **SDK Provider** to `OpenCode SDK (Local Server)`.
-4. Scroll down to **OpenCode SDK Setup** and click each blue link in order:
+2. Search `codoc` and click the CoDoc section.
+3. Set SDK Provider to OpenCode SDK (Local Server).
+4. Scroll down to OpenCode SDK Setup and click each blue link in order:
    - Step 1: Install OpenCode CLI → runs `npm install -g opencode-ai`.
    - Step 2: OpenCode Authentication → runs `opencode auth login` (follow terminal prompts).
-   - Step 3: Start OpenCode Server → runs `opencode serve -p 4096 --hostname 127.0.0.1` (keep terminal open).
-5. Optional settings:
-   - **OpenCode Server URL**: default `http://127.0.0.1:4096`.
-   - **Claude API Key**: only for `claude` provider.
-   - **Auto Sync**: toggle as needed.
+   - Step 3: Start OpenCode Server → runs `opencode serve -p 4096 --hostname 127.0.0.1` (keep this terminal open).
 
-### Via `settings.json` (direct)
-
-1. Open Command Palette: `Cmd+Shift+P` / `Ctrl+Shift+P`.
-2. Run: `Preferences: Open Settings (JSON)`.
-3. Add or update:
+Via settings.json
 
 ```json
 {
   "codoc.sdkProvider": "opencode",
-  "codoc.openCodeServerUrl": "http://127.0.0.1:4096",
-  "codoc.claudeApiKey": "",
-  "codoc.autoSync": true
+  "codoc.openCodeServerUrl": "http://127.0.0.1:4096"
 }
 ```
+
+### 8.3 Setup Claude Agent SDK
+
+Via VS Code Settings UI
+
+1. Open VS Code Settings: `Cmd + ,` (macOS) / `Ctrl + ,` (Windows/Linux).
+2. Search `codoc` and click the CoDoc section.
+3. Set SDK Provider to Claude Agent SDK (API Key).
+4. Fill in Claude API Key with your Anthropic API key (get one from https://console.anthropic.com/keys).
+
+Via settings.json
+
+```json
+{
+  "codoc.sdkProvider": "claude",
+  "codoc.claudeApiKey": "sk-ant-..."
+}
+```
+
+### 8.4 Optional settings (both providers)
+
+- OpenAI API Key: Required for impact analysis and feedforward suggestions.
+- Auto Sync: Toggle to auto-sync CoDoc with codebase changes.
+- OpenCode Server URL: Customize if running OpenCode on a different host/port.
 
 ## 9. Development workflow
 
