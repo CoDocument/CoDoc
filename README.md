@@ -239,15 +239,34 @@ Related files:
 
 ## 8. Configuration and settings
 
-In VS Code settings you can configure OpenAI and impact analysis behavior, for example:
+### Via VS Code Settings UI
+
+1. Open VS Code Settings: `Cmd + ,` (macOS) / `Ctrl + ,` (Windows/Linux).
+2. Search `codoc` and click the **CoDoc** section.
+3. Set **SDK Provider** to `OpenCode SDK (Local Server)`.
+4. Scroll down to **OpenCode SDK Setup** and click each blue link in order:
+   - Step 1: Install OpenCode CLI → runs `npm install -g opencode-ai`.
+   - Step 2: OpenCode Authentication → runs `opencode auth login` (follow terminal prompts).
+   - Step 3: Start OpenCode Server → runs `opencode serve -p 4096 --hostname 127.0.0.1` (keep terminal open).
+5. Optional settings:
+   - **OpenCode Server URL**: default `http://127.0.0.1:4096`.
+   - **Claude API Key**: only for `claude` provider.
+   - **Auto Sync**: toggle as needed.
+
+### Via `settings.json` (direct)
+
+1. Open Command Palette: `Cmd+Shift+P` / `Ctrl+Shift+P`.
+2. Run: `Preferences: Open Settings (JSON)`.
+3. Add or update:
 
 ```json
 {
-  "codoc.openaiApiKey": "sk-..."
+  "codoc.sdkProvider": "opencode",
+  "codoc.openCodeServerUrl": "http://127.0.0.1:4096",
+  "codoc.claudeApiKey": "",
+  "codoc.autoSync": true
 }
 ```
-
-You can also adjust any future settings that control which files are analyzed, how generations are scoped, or what host/port the OpenCode server uses, depending on how you wire the configuration in `extension.ts` and the services under `src/services/`.
 
 ## 9. Development workflow
 
